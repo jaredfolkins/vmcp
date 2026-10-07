@@ -173,14 +173,17 @@ func (e *enforcer) sweepCgroups() {
 			continue
 		}
 		pids, err := cgroupPIDs(p)
-		if err != nil {
+		if err != nil || len(pids) == 0 {
+			// An empty cgroup means Firecracker exited: the machine is
+			// ending and its teardown owns the cgroup. It is not a breach.
 			continue
 		}
 		if len(pids) > 1 {
 			e.violation(m, fmt.Sprintf("machine cgroup has %d processes, want 1", len(pids)))
 			continue
 		}
-		if _, v, err := postureViolations(p, m.uid); err == nil && len(v) > 0 {
+		if threads, v, err := postureViolations(p, m.uid); err == nil && threads > 0 && len(v) > 0 {
+			// threads is 0 when the process exited after cgroupPIDs.
 			e.violation(m, v[0])
 		}
 	}

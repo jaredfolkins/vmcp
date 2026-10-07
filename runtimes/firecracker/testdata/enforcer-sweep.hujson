@@ -1,0 +1,8 @@
+{
+  // cgroup.procs of a posture-checked machine whose Firecracker process
+  // exited. The machine is ending; the enforcer must not kill it.
+  "ending_machines": [
+    {"name": "empty cgroup", "procs": ""},
+    {"name": "process exited after listing", "procs": "4194303\n"},
+  ],
+}
