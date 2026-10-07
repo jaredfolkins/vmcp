@@ -53,13 +53,20 @@ type server struct {
 	log           *slog.Logger
 }
 
-// New returns the API handler. Only RouteHealth works without the
-// credential. A route that is not implemented answers not_found after
+// New returns the API handler. Only RouteHealth and RouteReady work
+// without the credential. A route that is not implemented answers not_found after
 // authentication.
 func New(cfg Config) http.Handler {
 	s := &server{credentialSum: sha256.Sum256(cfg.Credential), svc: cfg.Service, log: cfg.Logger}
 	mux := http.NewServeMux()
 	mux.HandleFunc(api.RouteHealth, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	mux.HandleFunc(api.RouteReady, func(w http.ResponseWriter, _ *http.Request) {
+		if s.svc.Status().Ready {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
 	routes := map[string]http.HandlerFunc{
 		api.RouteStatus:      func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.svc.Status()) },
 		api.RouteCreateImage: s.createImage,

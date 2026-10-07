@@ -8,7 +8,10 @@ const Version = "v1"
 // Route patterns in the net/http ServeMux form: a method, a space, and a
 // path. Path parameters use the {name} form.
 const (
-	RouteHealth   = "GET /healthz"
+	RouteHealth = "GET /healthz"
+	// RouteReady answers 204 when the runtime is ready and 503 when it is
+	// not. Like RouteHealth, it needs no credential and has no body.
+	RouteReady    = "GET /readyz"
 	RouteStatus   = "GET /v1/status"
 	RouteSelfTest = "POST /v1/selftest"
 
