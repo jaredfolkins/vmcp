@@ -545,13 +545,11 @@ func (m *Manager) launch(en *entry, spec api.MachineSpec) (Launch, error) {
 	if len(args) == 0 {
 		return Launch{}, errors.New("the image has no command and the spec has no args")
 	}
-	dir := p.WorkingDir
-	if dir == "" {
-		dir = "/"
-	}
+	dir := firstNonEmpty(spec.Process.Dir, p.WorkingDir, "/")
+	user := firstNonEmpty(spec.Process.User, p.User)
 	return Launch{
 		ID: en.rec.Machine.ID, Slot: en.rec.Slot, Dir: m.machineDir(en.rec.Machine.ID), ImageID: spec.Image,
-		Spec: spec, Args: args, Env: mergeEnv(p.Env, spec.Process.Env), WorkDir: dir, User: p.User,
+		Spec: spec, Args: args, Env: mergeEnv(p.Env, spec.Process.Env), WorkDir: dir, User: user,
 		Sink: &sink{m: m, en: en, redactions: copyRedactions(spec.Redactions), limit: outputLimit(spec)},
 	}, nil
 }
@@ -573,6 +571,15 @@ func outputLimit(spec api.MachineSpec) int64 {
 		return spec.OutputLimitBytes
 	}
 	return defaultOutputLimit
+}
+
+func firstNonEmpty(vs ...string) string {
+	for _, v := range vs {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // mergeEnv returns base with every key in over replaced or added.

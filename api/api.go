@@ -98,10 +98,15 @@ type MachineSpec struct {
 	Start bool `json:"start,omitempty"`
 }
 
-// Process is the guest process. Empty Args runs the image command.
+// Process is the guest process. Empty Args runs the image command. Env adds
+// to and replaces the image environment. Empty User and Dir use the image
+// configuration.
 type Process struct {
 	Args []string `json:"args,omitempty"`
 	Env  []string `json:"env,omitempty"`
+	// User is "uid", "uid:gid", "name", or "name:group" in the guest.
+	User string `json:"user,omitempty"`
+	Dir  string `json:"dir,omitempty"`
 }
 
 // Resources are the machine limits. DiskMiB is the root disk size.

@@ -34,7 +34,7 @@ func (f *fakeRuntime) Status() api.Status { return api.Status{Runtime: "fake", R
 
 func (f *fakeRuntime) PrepareImage(_ context.Context, _ string, req api.ImageRequest) (machine.ImageInfo, error) {
 	return machine.ImageInfo{ImageDigest: req.Ref[strings.Index(req.Ref, "@")+1:], Compatibility: "fake", SizeBytes: 1,
-		Process: machine.ProcessConfig{Cmd: []string{"echo:from-image"}, Env: []string{"A=image", "B=image"}}}, nil
+		Process: machine.ProcessConfig{Cmd: []string{"echo:from-image"}, Env: []string{"A=image", "B=image"}, User: "1000", WorkingDir: "/app"}}, nil
 }
 
 func (f *fakeRuntime) DeleteImage(string) error { return nil }
@@ -64,7 +64,8 @@ func (i *fakeInstance) Boot(context.Context) error {
 		var exit *api.Exit
 		switch {
 		case strings.HasPrefix(prog, "echo:"):
-			i.l.Sink.Event(api.Event{Kind: api.EventStdout, Data: []byte(strings.TrimPrefix(prog, "echo:") + "\n" + strings.Join(i.l.Env, ","))})
+			out := strings.TrimPrefix(prog, "echo:") + "\n" + strings.Join(i.l.Env, ",") + "\nuser=" + i.l.User + " dir=" + i.l.WorkDir
+			i.l.Sink.Event(api.Event{Kind: api.EventStdout, Data: []byte(out)})
 			exit = &api.Exit{Code: 0, Reason: api.ExitCompleted}
 		case strings.HasPrefix(prog, "exit:"):
 			exit = &api.Exit{Code: 7, Reason: api.ExitCompleted}
@@ -273,8 +274,16 @@ func TestEphemeralLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, out := h.runToExit(t, m2.ID)
-	if !strings.Contains(out, "from-image") || !strings.Contains(out, "A=image,B=spec") {
-		t.Errorf("stdout = %q, want the image command and merged env", out)
+	if !strings.Contains(out, "from-image") || !strings.Contains(out, "A=image,B=spec") || !strings.Contains(out, "user=1000 dir=/app") {
+		t.Errorf("stdout = %q, want the image command, merged env, image user, and image dir", out)
+	}
+	m3, err := h.c.CreateMachine(ctx, api.MachineSpec{Name: "user-override", Lifecycle: api.Ephemeral, Image: img,
+		TimeoutSeconds: 30, Process: api.Process{User: "0", Dir: "/work"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, out := h.runToExit(t, m3.ID); !strings.Contains(out, "user=0 dir=/work") {
+		t.Errorf("stdout = %q, want the spec user and dir to replace the image values", out)
 	}
 }
 
