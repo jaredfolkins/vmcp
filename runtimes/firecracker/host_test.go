@@ -27,8 +27,8 @@ func TestStatusReadyNeedsEveryCheck(t *testing.T) {
 	if !st.Ready {
 		t.Fatalf("Status().Ready = false with all checks present: %+v", st.Checks)
 	}
-	if st.Backend != Backend || st.Release == "" {
-		t.Errorf("Status() backend %q release %q, want %q and the baked release", st.Backend, st.Release, Backend)
+	if st.Runtime != Name || st.Release == "" {
+		t.Errorf("Status() runtime %q release %q, want %q and the baked release", st.Runtime, st.Release, Name)
 	}
 	if st.Capacity.MemoryMiB != 8192 {
 		t.Errorf("Status().Capacity.MemoryMiB = %d, want 8192", st.Capacity.MemoryMiB)

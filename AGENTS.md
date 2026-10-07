@@ -5,14 +5,14 @@
   service. It installs, configures, upgrades, and removes one VM technology
   on its host. Its HTTP API runs and manages machines, both ephemeral and
   persistent.
-- `firecracker/` is the only backend. More backends can follow with the
-  same contract (see [Backends](#backends)).
+- `runtimes/firecracker/` is the only runtime. Every runtime follows the
+  same contract (see [Runtimes](#runtimes)).
 - vmcp does not know its caller's domain. LEMC (`../letemcook-private`) is
   the first caller. The LEMC Runner goes away. The LEMC Web server calls the
   vmcp API directly. LEMCSSH and other LEMC clients reach machines only
   through Web.
 - The work is not complete. Read [Current State](#current-state) and
-  [Plan](#plan) before a change.
+  [BACKLOG.md](BACKLOG.md) before a change.
 
 ## User Communication
 - All reports and replies must use ASD-STE100 Simplified Technical English.
@@ -30,7 +30,7 @@
   images. A local run on this host with `/dev/kvm` and `/dev/net/tun`
   returned health 204, status 401 without the credential, and a ready status
   with the credential. SIGTERM stopped it with exit code 0.
-- `firecracker/release/` bakes in Firecracker `1.16.0` and jailer `1.16.0`,
+- `runtimes/firecracker/release/` bakes in Firecracker `1.16.0` and jailer `1.16.0`,
   linux/amd64, from the official upstream archive. The archive matches the
   GitHub asset digest and the published `.sha256.txt`. Both binaries match
   the archive `SHA256SUMS`. `go test ./firecracker` proves that the embedded
@@ -39,7 +39,7 @@
   LEMC jailer lab document records a passed jailer proof with official
   `1.16.0` on this host. A guest boot with the LEMC guest kernel and rootfs on
   `1.16.0` is `NOT VERIFIED`.
-- `firecracker/installers/` has Debian 12 and Ubuntu 24.04 amd64 host
+- `runtimes/firecracker/installers/` has Debian 12 and Ubuntu 24.04 amd64 host
   preparation scripts. The OS identity gate was checked in containers. The
   package, device, and Docker checks are `NOT VERIFIED` on a real Debian 12
   host.
@@ -48,7 +48,7 @@
   operator paths.
 
 ## Scope And Budget
-- Do the selected plan task and its acceptance checks. Then stop.
+- Do the selected backlog item and its acceptance checks. Then stop.
 - Do not start a later task, an adjacent cleanup, or a new framework
   without explicit user direction.
 - Repair the first failing owner. Do not add a fallback, retry, alias, or
@@ -85,8 +85,8 @@
 - The decision to install or upgrade vmcp.
 
 ### Neutrality rules
-- This module never imports LEMC. LEMC imports `api` and, after plan task
-  V2, `client`.
+- This module never imports LEMC. LEMC imports `api` and, after backlog
+  item V2, `client`.
 - Do not add caller concepts to vmcp: no job, lease, task, account, recipe,
   Cookbook, Provider, verb, or object key. Use machine, image, drive, file,
   upstream, port, snapshot, label, and event.
@@ -111,14 +111,14 @@
 - Every machine event has a sequence number. A caller resumes a stream with
   `after`.
 - `api/api.go` lists the draft routes. The server registers a route only
-  when a plan task implements it with its tests.
+  when a backlog item implements it with its tests.
 
 ### Change rules
 - A change to an exported identifier, route, or JSON field in `api` is an
   API change. Update vmcp and LEMC in one coordinated change.
 - Do not keep an old and a new API shape at the same time without a named
   compatibility range and a removal condition.
-- A new backend must not change the API.
+- A new runtime must not change the API.
 
 ## Machines
 
@@ -146,7 +146,7 @@
 - Ports: vmcp exposes a guest port only on the service network. The machine
   response lists each endpoint. Web authorizes and proxies user traffic.
 - Snapshots: vmcp pauses the guest, saves memory, device state, and disk,
-  and resumes it. Restore needs a stopped machine and the same backend
+  and resumes it. Restore needs a stopped machine and the same runtime
   release that made the snapshot. Restore replaces the machine state in
   place. Do not clone a snapshot into a second machine.
 
@@ -174,14 +174,24 @@
 | Cancel, timeout, lost heartbeat | Stop or delete; `timeout_seconds`; vmcp recovery |
 | `JobProof` | `api.Proof`; Web adds its object keys |
 
-## Backends
-- Each backend lives in one top-level directory named for its technology.
-  `firecracker/` is the only one.
-- A backend is supported only after it implements every route in `api`
-  that its plan task names, provides OS installer folders, provides an
+## Runtimes
+- A runtime is one VM technology. Each runtime lives in
+  `runtimes/<runtime>/` with its code, baked release, installers, and
+  deploy profiles. `runtimes/firecracker/` is the only one.
+- The second runtime will drive Apple `container` on macOS. It is a
+  deferred item in BACKLOG.md.
+- Do not add a shared runtime interface, registry, or plugin loader before
+  the second runtime needs it.
+- Each runtime builds only for its own host OS. Use Go build constraints:
+  Firecracker is `linux`. `cmd/vmcp` selects the runtime of the OS it is
+  built for. One vmcp binary serves one runtime.
+- A runtime is supported only after it implements every route in `api`
+  that its backlog item names, provides OS installer folders, provides an
   owned-resource inventory for teardown and status, and passes its live gate
   on each listed OS.
-- All backends and the service stay in one Go module. Split a backend into
+- A runtime may reject an `api` feature that its technology cannot provide.
+  It must answer with a fixed error code, not a partial behavior.
+- All runtimes and the service stay in one Go module. Split a runtime into
   its own module only when its dependencies conflict with the rest.
 
 ### Firecracker rules
@@ -190,7 +200,7 @@
 - vmcp runs as UID and GID `65532` with file or container capabilities, a
   seccomp profile, and an AppArmor profile. Only development may run as root
   and unconfined.
-- Firecracker and the jailer are baked in. `firecracker/release/` holds the
+- Firecracker and the jailer are baked in. `runtimes/firecracker/release/` holds the
   gzip binaries and `release-v1.json`, the lock with the upstream archive URL
   and SHA-256 and each binary's size, SHA-256, and mode. vmcp writes a binary
   only after its size and SHA-256 match the lock. Never download at install
@@ -207,9 +217,10 @@
 - The guest kernel, guest base rootfs, and guest tools are not baked in yet.
 
 ## Deployment
-- `Dockerfile` builds one image with the `vmcp` binary. The binary embeds
-  the Firecracker release. Pin both base images by digest.
-- The image has no runtime tools yet. Plan task V2 adds the pinned packages
+- `Dockerfile` builds the Linux image with the `vmcp` binary for the
+  Firecracker runtime. The binary embeds the Firecracker release. Pin both
+  base images by digest.
+- The image has no runtime tools yet. Backlog item V2 adds the pinned packages
   that the moved Firecracker code needs, such as `ip`, `nft`, and `mke2fs`.
 - In LEMC, the `vmcp` Compose service replaces the `runner` service. It
   needs:
@@ -228,13 +239,13 @@
 ## Host Install, Configuration, And Upgrade
 
 ### Supported hosts
-| Backend | OS | Version | Architecture | Folder |
+| Runtime | OS | Version | Architecture | Folder |
 | --- | --- | --- | --- | --- |
-| firecracker | Debian | 12 | amd64 | `firecracker/installers/linux/debian/12/amd64/` |
-| firecracker | Ubuntu | 24.04 | amd64 | `firecracker/installers/linux/ubuntu/24.04/amd64/` |
+| firecracker | Debian | 12 | amd64 | `runtimes/firecracker/installers/linux/debian/12/amd64/` |
+| firecracker | Ubuntu | 24.04 | amd64 | `runtimes/firecracker/installers/linux/ubuntu/24.04/amd64/` |
 
 - The folder path is
-  `<backend>/installers/<kernel>/<distribution>/<version>/<arch>/`. Use the
+  `runtimes/<runtime>/installers/<kernel>/<distribution>/<version>/<arch>/`. Use the
   `ID` and `VERSION_ID` values from `/etc/os-release`.
 - Firecracker hosts need systemd as PID 1, CPU virtualization flags,
   cgroup v2, rootful Docker, and read-write `/dev/kvm` and `/dev/net/tun`.
@@ -329,8 +340,8 @@ every other LEMC service are not vmcp-owned.
   bodies, private file contents, exec or console content, or raw guest
   output. Clear secret bytes after use. Apply `redactions` before an event
   leaves vmcp.
-- A change to a backend, networking, brokers, ports, exec, console,
-  snapshots, install, teardown, cleanup, or credentials needs the backend's
+- A change to a runtime, networking, brokers, ports, exec, console,
+  snapshots, install, teardown, cleanup, or credentials needs the runtime's
   Linux/KVM live gate. Unit tests do not replace it.
 - A live gate proves allowed behavior, denied reachability, terminal state,
   and removal of every owned process, jail, cgroup, namespace, tap, rule,
@@ -343,16 +354,16 @@ client/                             Go client for callers (V2)
 cmd/vmcp/                           serve, healthcheck, and install commands
 internal/server/                    HTTP server and authentication
 internal/install/                   teardown-first install transaction (V4)
-firecracker/                        Firecracker backend
-firecracker/release/                baked Firecracker and jailer, lock, licenses
-firecracker/installers/<kernel>/<distribution>/<version>/<arch>/
-firecracker/cmd/                    guest binaries (V2)
-firecracker/internal/               jail, launch, network, brokers, rootfs, guest (V2)
-firecracker/deploy/                 seccomp and AppArmor profiles (V2)
-Dockerfile                          service image
+runtimes/firecracker/               Firecracker runtime (linux)
+runtimes/firecracker/release/       baked Firecracker and jailer, lock, licenses
+runtimes/firecracker/installers/<kernel>/<distribution>/<version>/<arch>/
+runtimes/firecracker/cmd/           guest binaries (V2)
+runtimes/firecracker/internal/      jail, launch, network, brokers, rootfs, guest (V2)
+runtimes/firecracker/deploy/        seccomp and AppArmor profiles (V2)
+Dockerfile                          Linux service image
 docs/                               design, security, and ADRs
 ```
-- Create a package only when a plan task moves or writes code into it. Do
+- Create a package only when a backlog item moves or writes code into it. Do
   not create empty packages or placeholders.
 - Do not create `util`, `common`, `shared`, `helpers`, or `types` packages
   or package-per-file layouts.
@@ -363,13 +374,13 @@ Paths on the left are in `../letemcook-private`.
 ### Moves to vmcp
 | Source | Target |
 | --- | --- |
-| `src/microvmrunner` guest plan, Firecracker provider, direct-init protocol, ext4 builder, OCI unpack, self-test | `firecracker/internal/` |
-| `src/externalrunner` Firecracker API, launcher, supervisor, jail, network, brokers, recovery journal, rootfs conversion, host preparation | `firecracker/internal/` |
-| `src/runnerpool` guest network planner | `firecracker/internal/` |
-| `src/runnerbootstrap` provider store, verify, GC, host checks | `firecracker/internal/`, `internal/install/` |
-| `src/internal/guesttools`, `src/cmd/lemc-guest-init`, `src/cmd/lemc-direct-init` | `firecracker/cmd/`, `firecracker/internal/` |
-| `deploy/production/runner-seccomp.json`, `runner-apparmor.profile`, guest kernel and rootfs pins | `firecracker/deploy/` |
-| Firecracker, jailer, guest image, rootfs, network, broker, and bundle scripts | `firecracker/scripts/` |
+| `src/microvmrunner` guest plan, Firecracker provider, direct-init protocol, ext4 builder, OCI unpack, self-test | `runtimes/firecracker/internal/` |
+| `src/externalrunner` Firecracker API, launcher, supervisor, jail, network, brokers, recovery journal, rootfs conversion, host preparation | `runtimes/firecracker/internal/` |
+| `src/runnerpool` guest network planner | `runtimes/firecracker/internal/` |
+| `src/runnerbootstrap` provider store, verify, GC, host checks | `runtimes/firecracker/internal/`, `internal/install/` |
+| `src/internal/guesttools`, `src/cmd/lemc-guest-init`, `src/cmd/lemc-direct-init` | `runtimes/firecracker/cmd/`, `runtimes/firecracker/internal/` |
+| `deploy/production/runner-seccomp.json`, `runner-apparmor.profile`, guest kernel and rootfs pins | `runtimes/firecracker/deploy/` |
+| Firecracker, jailer, guest image, rootfs, network, broker, and bundle scripts | `runtimes/firecracker/scripts/` |
 | `docs/RUNNER_MICROVM.md`, `RUNNER_FIRECRACKER_JAILER_LAB.md`, `RUNNER_SECURITY.md` (VM parts) | `docs/` |
 
 ### Deleted in LEMC
@@ -392,56 +403,16 @@ Paths on the left are in `../letemcook-private`.
 - The System page shows `GET /v1/status`.
 - `lemc-install` and Angel call `vmcp install`.
 
-## Plan
-- Each task that changes `../letemcook-private` must first be the one
-  active phase in its `docs/PLAN.md`. Only the user selects it.
-- Do one task at a time. Each task leaves both repositories green.
-
-1. **V0 Foundation.** Guide, baked Firecracker and jailer, draft `api`,
-   `vmcp serve` with health and status, `Dockerfile`, and installer folders.
-   Done.
-2. **V1 Remove the embedded Runner (LEMC).** Delete it and the unused
-   `runnerpool` code. Accept: LEMC still runs one jailed recipe end to end.
-3. **V2 Ephemeral machines (vmcp).** Move the Firecracker code. Implement
-   images, create, drives, start, events, stop, delete, self-test, and
-   recovery. Add the `client` package and the runtime tools to the image.
-   Accept: the Firecracker live gate passes in this repository.
-4. **V3 Web dispatch (LEMC).** Web runs recipes, Provider activations, and
-   Builder runs through vmcp. The `vmcp` service replaces `runner`. Delete
-   the Runner code and protocol. Accept: browser, LEMCSSH, and `lemcli`
-   parity for one recipe with events, storage, cancel, timeout, and restart
-   recovery; demo readiness passes.
-5. **V4 Install and upgrade.** `vmcp install` and the OS folder entry
-   points. LEMC `lemc-install` and Angel delegate to it. Accept: on each
-   supported OS, the live gate proves a fresh install, a same-version
-   reinstall, an upgrade, an injected failure that rolls back, a teardown
-   that leaves only the preserved state, and a purge that leaves nothing.
-6. **V5 Persistent machines.** Root disk, drives, stop, start, restart,
-   restart policy, and preservation across upgrade. Accept: live gate.
-7. **V6 Exec, console, and ports.** Accept: live gate with allowed and
-   denied access, and Web relay tests.
-8. **V7 Snapshots.** Create, list, restore, and delete. Accept: live gate,
-   including a refused restore across releases.
-9. **V8 Release lane.** Build, record, and publish the vmcp image with
-   pinned tools. LEMC consumes it by digest.
-
-LEMC product features for persistent machines, such as pages and LEMCSSH
-commands, are separate LEMC phases.
-
-## Open Decisions
-Ask the user before a task depends on one of these.
-
-- Storage path. Default: Web downloads drive tars and publishes them to
-  object storage. The other option is a vmcp upload to a storage upstream,
-  which avoids one copy.
-- WebSocket library for exec and console. Default: `gorilla/websocket`,
-  which LEMC already uses.
-- Capacity policy. Today status reports host totals. Decide reservations
-  and overcommit before V2 accepts concurrent machines.
-- Network identity of a persistent machine across restarts and restores.
-- Whether to bake in the guest kernel, guest base rootfs, and guest tools.
-- How LEMC release builds get this module's source: vendor it, or extend
-  the release source receipt to two commits.
+## Work Tracking
+- [BACKLOG.md](BACKLOG.md) is the only work list. It holds the ordered
+  items, deferred items, and decisions that are still open.
+- Work on one item at a time, in order. Only the user selects a deferred
+  item or a new item.
+- An item that changes `../letemcook-private` must first be the one active
+  phase in its `docs/PLAN.md`. Only the user selects it.
+- When an item is accepted, move it to Done in BACKLOG.md with its commit.
+  When a decision is settled, record it in this guide and remove it from
+  BACKLOG.md.
 
 ## Go Rules
 - Go is pinned to `1.26.2` in `go.mod`, `.go-version`, and the

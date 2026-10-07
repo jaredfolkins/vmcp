@@ -18,8 +18,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jaredfolkins/vmcp/firecracker"
 	"github.com/jaredfolkins/vmcp/internal/server"
+	"github.com/jaredfolkins/vmcp/runtimes/firecracker"
 )
 
 const (
@@ -74,7 +74,7 @@ func serve(args []string, log *slog.Logger) error {
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	st := host.Status()
-	log.Info("vmcp serving", "listen", *listen, "backend", st.Backend, "release", st.Release, "ready", st.Ready)
+	log.Info("vmcp serving", "listen", *listen, "runtime", st.Runtime, "release", st.Release, "ready", st.Ready)
 
 	select {
 	case err := <-errc:

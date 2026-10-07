@@ -1,5 +1,5 @@
 # vmcp service image. The Firecracker and jailer binaries are embedded in
-# the vmcp binary from firecracker/release.
+# the vmcp binary from runtimes/firecracker/release.
 #
 # Run it with the devices, capabilities, and profiles from AGENTS.md
 # (Deployment). Do not publish its port on a host interface.
@@ -9,7 +9,7 @@ WORKDIR /src
 COPY go.mod ./
 COPY api ./api
 COPY cmd ./cmd
-COPY firecracker ./firecracker
+COPY runtimes ./runtimes
 COPY internal ./internal
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags='-s -w -buildid=' -o /out/vmcp ./cmd/vmcp

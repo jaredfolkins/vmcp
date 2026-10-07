@@ -12,10 +12,10 @@ import (
 	"github.com/jaredfolkins/vmcp/api"
 )
 
-// Backend is the backend name in status and proofs.
-const Backend = "firecracker"
+// Name is the runtime name in status and proofs.
+const Name = "firecracker"
 
-// Host is the set of host paths that the backend checks. Tests replace
+// Host is the set of host paths that the runtime checks. Tests replace
 // them.
 type Host struct {
 	KVMDevice      string
@@ -44,10 +44,10 @@ func (h Host) Checks() []api.Check {
 	return checks
 }
 
-// Status reports the backend release, host checks, and host capacity.
+// Status reports the runtime release, host checks, and host capacity.
 // Ready is true only when every check passes.
 func (h Host) Status() api.Status {
-	st := api.Status{Backend: Backend, Checks: h.Checks(), Ready: true}
+	st := api.Status{Runtime: Name, Checks: h.Checks(), Ready: true}
 	if r, err := BakedRelease(); err == nil {
 		st.Release = r.Version
 	}

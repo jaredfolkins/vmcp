@@ -19,7 +19,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	h := New(Config{
 		Credential: []byte(testCredential),
-		Status:     func() api.Status { return api.Status{Backend: "test", Ready: true} },
+		Status:     func() api.Status { return api.Status{Runtime: "test", Ready: true} },
 		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	srv := httptest.NewServer(h)
@@ -80,7 +80,7 @@ func TestAuthentication(t *testing.T) {
 	}
 }
 
-// TestStatusBody proves that status returns the backend report as JSON.
+// TestStatusBody proves that status returns the runtime report as JSON.
 func TestStatusBody(t *testing.T) {
 	srv := newTestServer(t)
 	resp := get(t, srv.URL+"/v1/status", testCredential)
@@ -88,8 +88,8 @@ func TestStatusBody(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatalf("decode status: %v", err)
 	}
-	if got.Backend != "test" || !got.Ready {
-		t.Errorf("status = %+v, want backend test and ready", got)
+	if got.Runtime != "test" || !got.Ready {
+		t.Errorf("status = %+v, want runtime test and ready", got)
 	}
 }
 

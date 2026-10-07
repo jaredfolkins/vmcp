@@ -16,7 +16,7 @@ import (
 type Config struct {
 	// Credential is the bearer credential of the one caller.
 	Credential []byte
-	// Status reports the backend status.
+	// Status reports the runtime status.
 	Status func() api.Status
 	Logger *slog.Logger
 }

@@ -244,15 +244,15 @@ type Exit struct {
 // Proof records how a guest was isolated and destroyed.
 type Proof struct {
 	MachineID         string `json:"machine_id"`
-	Backend           string `json:"backend"`
+	Runtime           string `json:"runtime"`
 	Release           string `json:"release"`
 	ImageDigest       string `json:"image_digest"`
 	NetworkPolicyHash string `json:"network_policy_hash"`
 	DestroyReason     string `json:"destroy_reason"`
 	Destroyed         bool   `json:"destroyed"`
 	TeardownStatus    string `json:"teardown_status"`
-	// Detail is the backend proof document. Its schema belongs to the
-	// backend.
+	// Detail is the runtime proof document. Its schema belongs to the
+	// runtime.
 	Detail map[string]any `json:"detail,omitempty"`
 }
 
@@ -269,7 +269,7 @@ type Image struct {
 	ID          string `json:"id"`
 	Ref         string `json:"ref"`
 	ImageDigest string `json:"image_digest"`
-	// Compatibility identifies the backend inputs that produced the image.
+	// Compatibility identifies the runtime inputs that produced the image.
 	Compatibility string    `json:"compatibility"`
 	SizeBytes     int64     `json:"size_bytes"`
 	CreatedAt     time.Time `json:"created_at"`
@@ -316,7 +316,7 @@ type SnapshotRequest struct {
 }
 
 // Snapshot is a saved state of a persistent machine. A restore needs the
-// same backend release that created the snapshot.
+// same runtime release that created the snapshot.
 type Snapshot struct {
 	ID        string    `json:"id"`
 	MachineID string    `json:"machine_id"`
@@ -334,7 +334,7 @@ type RestoreRequest struct {
 
 // Status is the response of RouteStatus.
 type Status struct {
-	Backend  string   `json:"backend"`
+	Runtime  string   `json:"runtime"`
 	Release  string   `json:"release"`
 	Ready    bool     `json:"ready"`
 	Checks   []Check  `json:"checks"`

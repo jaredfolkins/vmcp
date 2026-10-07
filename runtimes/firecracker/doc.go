@@ -1,4 +1,4 @@
-// Package firecracker is the Firecracker backend of the VM control plane.
+// Package firecracker is the Firecracker runtime of vmcp.
 //
 // It bakes in one known Firecracker and jailer release. The binaries and
 // their lock are embedded from the release directory. An install writes
