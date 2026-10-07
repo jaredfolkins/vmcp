@@ -21,11 +21,14 @@ that every item follows.
 ## Next
 1. **V1 Remove the embedded Runner (LEMC).** Delete it and the unused
    `runnerpool` code. Accept: LEMC still runs one jailed recipe end to end.
-2. **V2 Ephemeral machines (vmcp).** Move the Firecracker code. Implement
-   images, create, drives, start, events, stop, delete, self-test, and
-   recovery. Add the `client` package and the runtime tools to the image.
-   Accept: the Firecracker live gate passes in this repository with the
-   LEMC guest kernel and rootfs.
+2. **V2 Ephemeral machines (vmcp).** Implement images, create, drives,
+   start, events, stop, delete, self-test, and recovery on Firecracker, with
+   the ownership tags, the posture contract, and the enforcer. Add the
+   `client` package and the runtime tools to the image. Accept: the
+   Firecracker live gate passes in this repository with the LEMC guest
+   kernel. It proves allowed and denied network access, the posture contract
+   on every thread, that the enforcer kills an injected violation, and
+   complete cleanup.
 3. **V3 Web dispatch (LEMC).** Web runs recipes, Provider activations, and
    Builder runs through vmcp. The `vmcp` service replaces `runner`. Delete
    the Runner code and protocol. Accept: browser, LEMCSSH, and `lemcli`
@@ -91,7 +94,5 @@ commands, are separate LEMC phases.
   and overcommit. Needed by V2.
 - Network identity of a persistent machine across restarts and restores.
   Needed by V5.
-- Whether to bake in the guest kernel, guest base rootfs, and guest tools.
-  Needed by V2.
 - How LEMC release builds get this module's source: vendor it, or extend
   the release source receipt to two commits. Needed by V3.

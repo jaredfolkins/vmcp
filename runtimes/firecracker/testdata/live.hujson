@@ -1,0 +1,14 @@
+// Live gate input for TestLiveFirecracker. Run it inside the vmcp image
+// with the devices and capabilities in AGENTS.md (Deployment).
+{
+  "state_root": "/var/lib/vmcp",
+  "jail_base": "/var/lib/vmcp/jail",
+  "kernel_path": "/usr/share/vmcp/vmlinux",
+  "agent_path": "/usr/libexec/vmcp/vmcp-agent",
+  "cgroup_parent": "vmcp-live",
+  "pool": "100.80.0.0/16",
+  "dns_upstreams": ["1.1.1.1:53", "8.8.8.8:53"],
+  // busybox 1.37.0 image index; the runtime selects linux/amd64.
+  "image_ref": "docker.io/library/busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
+  "egress_url": "http://example.com/",
+}

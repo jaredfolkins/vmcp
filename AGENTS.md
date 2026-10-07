@@ -197,6 +197,19 @@
 ### Firecracker rules
 - Always use the jailer. Run each guest with a non-root UID and GID, a
   chroot, cgroup v2 limits, rlimits, and a new PID namespace.
+- vmcp sets `no_new_privs` on itself at startup, so the jailer and every
+  Firecracker process inherit it.
+- Host and guest talk only over vsock. The guest agent sends events and the
+  tar of each writable drive to the host. The host never mounts or parses a
+  guest ext4 image.
+- Keep the jail base path short, such as `/var/lib/vmcp/jail`. A Unix socket
+  path in a jail must stay under the 108-byte limit.
+- Guest network: one tap device per machine in the vmcp network namespace,
+  one dedicated nftables table, and brokers written in Go inside vmcp. There
+  is no forwarding and no NAT from a tap.
+- The guest kernel and other large guest inputs are downloaded at image
+  build time and pinned by SHA-256. They are never downloaded at install or
+  run time.
 - vmcp runs as UID and GID `65532` with file or container capabilities, a
   seccomp profile, and an AppArmor profile. Only development may run as root
   and unconfined.
@@ -329,6 +342,44 @@ every other LEMC service are not vmcp-owned.
   upgrade does not change OS packages.
 
 ## Runtime Security
+
+### Ownership tags
+- Tag every host resource that vmcp creates with its install identity:
+  - cgroups: the `trusted.vmcp.owner` extended attribute on the parent
+    cgroup and on each machine cgroup;
+  - files: an owner marker in the state root and in each jail root;
+  - network: the `vmcp-` name prefix and an `ifalias` of
+    `vmcp:<install>:<machine>` on each tap and veth device;
+  - nftables: the one `vmcp` table, with the machine ID in each rule
+    comment.
+- Inventory, teardown, and status work from these tags. vmcp deletes only
+  tagged resources. It reports an untagged or conflicting resource and does
+  not touch it.
+
+### Posture contract
+After boot, every thread of a jailed Firecracker process must have:
+UID and GID `65532`; zero effective, permitted, and ambient capabilities;
+`NoNewPrivs: 1`; `Seccomp: 2`; the jail chroot; PID 1 in its own PID
+namespace; and its machine cgroup with memory, CPU, and pids limits. Its jail
+root holds only the expected files, with no setuid or setgid file and no
+device node other than the ones the jailer creates.
+
+### Enforcer
+- One enforcer goroutine audits every owned asset all the time. It reacts to
+  netlink link, address, and route events, nftables events on the `vmcp`
+  table, cgroup events, and jail-root file events. A full sweep every few
+  seconds catches anything that an event missed.
+- On a violation, it kills the whole machine with `cgroup.kill`, removes
+  the unexpected asset or restores the `vmcp` table, records a security
+  event, and marks the machine `failed`.
+- It acts only inside vmcp's tagged scope. It never signals or deletes a
+  process or resource that vmcp does not own.
+- It fails closed. If the enforcer stops or falls behind, status is not
+  ready and vmcp refuses new machines.
+- The enforcer detects and contains. KVM, the jailer, seccomp, cgroups, and
+  the network rules prevent.
+
+### Rules
 - A guest can reach only its brokers: DNS, policy-controlled public egress,
   and the exact upstreams in its spec. Exposed ports accept traffic only
   from the service network.
