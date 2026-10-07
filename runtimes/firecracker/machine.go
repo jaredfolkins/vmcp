@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/jaredfolkins/vmcp/api"
+	"github.com/jaredfolkins/vmcp/internal/machine"
 	"github.com/jaredfolkins/vmcp/runtimes/firecracker/internal/agentproto"
 	"github.com/jaredfolkins/vmcp/runtimes/firecracker/internal/image"
 )
@@ -38,40 +39,10 @@ const (
 
 var upstreamNameRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,31}$`)
 
-// LaunchSpec is one machine for the runtime.
-type LaunchSpec struct {
-	ID   string
-	Slot int
-	// Dir is the machine work directory. Input drive trees are in
-	// Dir/in/<drive>. Writable drive tars go to Dir/out/<drive>.tar.
-	Dir     string
-	ImageID string
-	Spec    api.MachineSpec
-	// Args, Env, WorkDir, and User are the resolved guest process.
-	Args    []string
-	Env     []string
-	WorkDir string
-	User    string
-	Sink    Sink
-}
-
-// Sink receives machine events in order. Seq and Time are set by the
-// sink.
-type Sink interface {
-	Event(api.Event)
-}
-
-// Result is the end of a machine.
-type Result struct {
-	// Exit is nil when the guest agent reported no exit.
-	Exit  *api.Exit
-	Proof api.Proof
-}
-
 // Machine is one provisioned Firecracker guest.
 type Machine struct {
 	r        *Runtime
-	spec     LaunchSpec
+	spec     machine.Launch
 	jailID   string
 	uid      int
 	jailRoot string
@@ -90,17 +61,17 @@ type Machine struct {
 	exit       *api.Exit
 	posture    map[string]any
 	done       chan struct{}
-	result     Result
+	result     machine.Result
 }
 
 // Provision builds the jail, drives, network, and brokers of a machine. It
 // does not boot the guest.
-func (r *Runtime) Provision(ctx context.Context, ls LaunchSpec) (m *Machine, err error) {
+func (r *Runtime) Provision(ctx context.Context, ls machine.Launch) (inst machine.Instance, err error) {
 	id := strings.TrimPrefix(ls.ID, "m-")
 	if len(id) < 10 {
 		return nil, fmt.Errorf("machine ID %q is too short", ls.ID)
 	}
-	m = &Machine{
+	m := &Machine{
 		r:      r,
 		spec:   ls,
 		jailID: "vmcp-" + id[:10],
@@ -402,14 +373,14 @@ func (m *Machine) Kill(reason string) {
 func (m *Machine) Done() <-chan struct{} { return m.done }
 
 // Result returns the result after Done is closed.
-func (m *Machine) Result() Result {
+func (m *Machine) Result() machine.Result {
 	<-m.done
 	return m.result
 }
 
 // Destroy removes a machine that never booted, or kills a booted machine
 // and waits for its teardown.
-func (m *Machine) Destroy(ctx context.Context, reason string) Result {
+func (m *Machine) Destroy(ctx context.Context, reason string) machine.Result {
 	m.mu.Lock()
 	booted := m.booted
 	m.mu.Unlock()
@@ -452,7 +423,7 @@ func (m *Machine) finish(ctx context.Context, reason string) {
 	if m.posture != nil {
 		detail["posture"] = m.posture
 	}
-	m.result = Result{
+	m.result = machine.Result{
 		Exit: m.exit,
 		Proof: api.Proof{
 			MachineID:         m.spec.ID,

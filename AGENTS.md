@@ -23,29 +23,43 @@
 ## Current State
 - `api/` is the draft HTTP contract. Routes and fields can change until LEMC
   uses them in production.
-- `cmd/vmcp serve` implements only `GET /healthz` and `GET /v1/status`.
-  Every other route answers `not_found` after authentication.
-  `vmcp healthcheck` probes the health route.
-- `Dockerfile` builds the service image from the LEMC-pinned Go and Debian
-  images. A local run on this host with `/dev/kvm` and `/dev/net/tun`
-  returned health 204, status 401 without the credential, and a ready status
-  with the credential. SIGTERM stopped it with exit code 0.
-- `runtimes/firecracker/release/` bakes in Firecracker `1.16.0` and jailer `1.16.0`,
-  linux/amd64, from the official upstream archive. The archive matches the
-  GitHub asset digest and the published `.sha256.txt`. Both binaries match
-  the archive `SHA256SUMS`. `go test ./firecracker` proves that the embedded
-  bytes match the lock.
-- LEMC still ships Firecracker `1.12.0` and runs jobs through its Runner. The
-  LEMC jailer lab document records a passed jailer proof with official
-  `1.16.0` on this host. A guest boot with the LEMC guest kernel and rootfs on
-  `1.16.0` is `NOT VERIFIED`.
+- `vmcp serve` implements health, status, images (create, list, get,
+  delete), ephemeral machines (create, list, get, start, stop, delete),
+  drive upload and download, and event streams. Persistent machines, exec,
+  console, ports, snapshots, and self-test are not implemented; their routes
+  answer `not_found` and a persistent spec is refused.
+- `client/` is the Go client. `internal/machine` is the runtime-neutral
+  manager. `runtimes/firecracker` is the Firecracker runtime with its guest
+  agent, image preparation, network, Go brokers, and posture checks.
+- Create reserves a machine. Start provisions and boots it. A caller that
+  needs launch evidence records it before start.
+- Live evidence on this host, inside the vmcp image with the vmcp seccomp
+  profile, `no-new-privileges`, and a dropped capability set:
+  - `TestLiveFirecracker` (runtimes/firecracker): process I/O, image user,
+    output drive, posture on every thread, egress allowed, metadata, private,
+    direct, and host-port access denied, DNS, and complete teardown.
+  - `TestEphemeralMachine` (e2e) through the running service and the Go
+    client: drives, events, redaction, egress, proof.
+- Not done for V2: the enforcer goroutine, `POST /v1/selftest`, and running
+  vmcp as UID 65532. vmcp runs as root inside its container today.
+- `runtimes/firecracker/release/` bakes in Firecracker `1.16.0` and jailer
+  `1.16.0`, linux/amd64, verified against the upstream archive.
 - `runtimes/firecracker/installers/` has Debian 12 and Ubuntu 24.04 amd64 host
-  preparation scripts. The OS identity gate was checked in containers. The
-  package, device, and Docker checks are `NOT VERIFIED` on a real Debian 12
-  host.
+  preparation scripts. Only the OS identity gate was checked, in containers.
+- LEMC still runs jobs through its Runner on Firecracker `1.12.0`.
 - The remote is `git@github.com:jaredfolkins/vmcp.git`. The repository is
   public. Do not push private LEMC data, credentials, host names, or
   operator paths.
+
+### Container settings proven by the live gate
+`--cgroupns=host`, `-v /sys/fs/cgroup:/sys/fs/cgroup:rw`,
+`--security-opt systempaths=unconfined`, `--security-opt no-new-privileges`,
+`--security-opt seccomp=runtimes/firecracker/deploy/seccomp.json`,
+`--device /dev/kvm`, `--device /dev/net/tun`, `--cap-drop ALL`, and
+`--cap-add` CHOWN, DAC_OVERRIDE, FOWNER, FSETID, MKNOD, NET_ADMIN,
+NET_BIND_SERVICE, SETUID, SETGID, SYS_ADMIN, SYS_CHROOT, SYS_RESOURCE.
+Docker's default seccomp profile blocks the jailer `pivot_root`. AppArmor ran
+unconfined; a vmcp AppArmor profile is not written yet.
 
 ## Scope And Budget
 - Do the selected backlog item and its acceptance checks. Then stop.
@@ -197,8 +211,9 @@
 ### Firecracker rules
 - Always use the jailer. Run each guest with a non-root UID and GID, a
   chroot, cgroup v2 limits, rlimits, and a new PID namespace.
-- vmcp sets `no_new_privs` on itself at startup, so the jailer and every
-  Firecracker process inherit it.
+- vmcp runs with `no_new_privs` (the container `no-new-privileges` option),
+  so the jailer and every Firecracker process inherit it. `vmcp serve`
+  refuses to start without it.
 - Host and guest talk only over vsock. The guest agent sends events and the
   tar of each writable drive to the host. The host never mounts or parses a
   guest ext4 image.
@@ -233,8 +248,9 @@
 - `Dockerfile` builds the Linux image with the `vmcp` binary for the
   Firecracker runtime. The binary embeds the Firecracker release. Pin both
   base images by digest.
-- The image has no runtime tools yet. Backlog item V2 adds the pinned packages
-  that the moved Firecracker code needs, such as `ip`, `nft`, and `mke2fs`.
+- The image installs `iproute2`, `nftables`, `e2fsprogs`, and CA
+  certificates, and fetches the pinned guest kernel by SHA-256. Pin the
+  package versions in the release lane (V8).
 - In LEMC, the `vmcp` Compose service replaces the `runner` service. It
   needs:
   - user `65532:65532`, the Runner capability set until a live gate proves a

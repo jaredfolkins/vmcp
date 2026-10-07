@@ -170,3 +170,30 @@ func firstLine(b []byte) string {
 	}
 	return s
 }
+
+// ownedTaps lists the taps whose alias carries this install tag.
+func ownedTaps(ctx context.Context, installID string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "ip", "-o", "link", "show")
+	cmd.Env = []string{toolPath, "LC_ALL=C"}
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list links: %w", err)
+	}
+	prefix := "vmcp:" + installID + ":"
+	var taps []string
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		name := strings.TrimSuffix(fields[1], ":")
+		name, _, _ = strings.Cut(name, "@")
+		if !strings.HasPrefix(name, TapPrefix) {
+			continue
+		}
+		if i := strings.Index(line, "alias "); i >= 0 && strings.HasPrefix(line[i+len("alias "):], prefix) {
+			taps = append(taps, name)
+		}
+	}
+	return taps, nil
+}

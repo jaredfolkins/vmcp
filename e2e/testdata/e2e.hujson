@@ -1,0 +1,9 @@
+// End-to-end gate input. Point it at a running vmcp service.
+{
+  "url": "http://127.0.0.1:18081",
+  // Owner-private file with the vmcp credential, relative to this file.
+  "credential_file": "../../.e2e/vmcp-credential",
+  // busybox 1.37.0 image index; vmcp selects linux/amd64.
+  "image_ref": "docker.io/library/busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
+  "egress_url": "http://example.com/",
+}

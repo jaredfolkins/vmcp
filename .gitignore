@@ -7,3 +7,4 @@
 .gocache/
 .gomodcache/
 .gopath/
+/.e2e/

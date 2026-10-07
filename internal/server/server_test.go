@@ -1,95 +1,350 @@
 package server
 
 import (
-	"encoding/json"
+	"archive/tar"
+	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jaredfolkins/vmcp/api"
+	"github.com/jaredfolkins/vmcp/client"
+	"github.com/jaredfolkins/vmcp/internal/machine"
 )
 
 const testCredential = "test-credential-0123456789abcdef0123456789"
 
-func newTestServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	h := New(Config{
-		Credential: []byte(testCredential),
-		Status:     func() api.Status { return api.Status{Runtime: "test", Ready: true} },
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
-	return srv
+// fakeRuntime runs scripted machines. The guest "program" is the first
+// spec arg: "echo:<text>" prints and exits 0, "exit:<n>" exits n, "hang"
+// runs until killed, "copy" copies drive "in" file "f" to drive "out".
+type fakeRuntime struct {
+	mu        sync.Mutex
+	recovered int
 }
 
-func get(t *testing.T, url, token string) *http.Response {
+func (f *fakeRuntime) Status() api.Status { return api.Status{Runtime: "fake", Ready: true} }
+
+func (f *fakeRuntime) PrepareImage(_ context.Context, _ string, req api.ImageRequest) (machine.ImageInfo, error) {
+	return machine.ImageInfo{ImageDigest: req.Ref[strings.Index(req.Ref, "@")+1:], Compatibility: "fake", SizeBytes: 1,
+		Process: machine.ProcessConfig{Cmd: []string{"echo:from-image"}, Env: []string{"A=image", "B=image"}}}, nil
+}
+
+func (f *fakeRuntime) DeleteImage(string) error { return nil }
+
+func (f *fakeRuntime) Recover(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recovered++
+	return nil
+}
+
+func (f *fakeRuntime) Provision(_ context.Context, l machine.Launch) (machine.Instance, error) {
+	return &fakeInstance{l: l, done: make(chan struct{}), kill: make(chan string, 1)}, nil
+}
+
+type fakeInstance struct {
+	l      machine.Launch
+	done   chan struct{}
+	kill   chan string
+	result machine.Result
+	once   sync.Once
+}
+
+func (i *fakeInstance) Boot(context.Context) error {
+	go func() {
+		prog := i.l.Args[0]
+		var exit *api.Exit
+		switch {
+		case strings.HasPrefix(prog, "echo:"):
+			i.l.Sink.Event(api.Event{Kind: api.EventStdout, Data: []byte(strings.TrimPrefix(prog, "echo:") + "\n" + strings.Join(i.l.Env, ","))})
+			exit = &api.Exit{Code: 0, Reason: api.ExitCompleted}
+		case strings.HasPrefix(prog, "exit:"):
+			exit = &api.Exit{Code: 7, Reason: api.ExitCompleted}
+		case prog == "copy":
+			b, _ := os.ReadFile(filepath.Join(i.l.Dir, "in", "in", "f"))
+			writeTar(filepath.Join(i.l.Dir, "out", "out.tar"), "f", b)
+			exit = &api.Exit{Code: 0, Reason: api.ExitCompleted}
+		case prog == "flood":
+			for range 100 {
+				i.l.Sink.Event(api.Event{Kind: api.EventStdout, Data: bytes.Repeat([]byte("x"), 1024)})
+			}
+			<-i.kill
+		case prog == "hang":
+			<-i.kill
+		}
+		i.finish(exit)
+	}()
+	return nil
+}
+
+func (i *fakeInstance) finish(exit *api.Exit) {
+	i.once.Do(func() {
+		i.result = machine.Result{Exit: exit, Proof: api.Proof{MachineID: i.l.ID, Runtime: "fake", Destroyed: true, TeardownStatus: "destroyed"}}
+		close(i.done)
+	})
+}
+
+func (i *fakeInstance) Kill(reason string) {
+	select {
+	case i.kill <- reason:
+	default:
+	}
+}
+func (i *fakeInstance) Done() <-chan struct{}  { return i.done }
+func (i *fakeInstance) Result() machine.Result { <-i.done; return i.result }
+func (i *fakeInstance) Destroy(_ context.Context, reason string) machine.Result {
+	i.Kill(reason)
+	return i.Result()
+}
+
+func writeTar(path, name string, body []byte) {
+	_ = os.MkdirAll(filepath.Dir(path), 0o700)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	_ = tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg})
+	_, _ = tw.Write(body)
+	_ = tw.Close()
+	_ = os.WriteFile(path, buf.Bytes(), 0o600)
+}
+
+type harness struct {
+	c   *client.Client
+	url string
+	dir string
+	rt  *fakeRuntime
+}
+
+func newHarness(t *testing.T, dir string) *harness {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	rt := &fakeRuntime{}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr, err := machine.New(context.Background(), rt, machine.Config{Dir: dir, MaxMachines: 4, Logger: log})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := http.DefaultClient.Do(req)
+	srv := httptest.NewServer(New(Config{Credential: []byte(testCredential), Service: mgr, Logger: log}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL, testCredential, srv.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = resp.Body.Close() })
-	return resp
+	return &harness{c: c, url: srv.URL, dir: dir, rt: rt}
+}
+
+func (h *harness) image(t *testing.T) string {
+	t.Helper()
+	img, err := h.c.CreateImage(context.Background(), api.ImageRequest{Ref: "example/app@sha256:" + strings.Repeat("a", 64)})
+	if err != nil {
+		t.Fatalf("CreateImage() error = %v", err)
+	}
+	return img.ID
+}
+
+// runToExit starts a machine and returns its exit event and stdout.
+func (h *harness) runToExit(t *testing.T, id string) (*api.Exit, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := h.c.StartMachine(ctx, id); err != nil {
+		t.Fatalf("StartMachine() error = %v", err)
+	}
+	var exit *api.Exit
+	var out strings.Builder
+	var last uint64
+	err := h.c.Events(ctx, id, 0, true, func(ev api.Event) error {
+		if ev.Seq != last+1 {
+			t.Errorf("event seq = %d after %d, want consecutive", ev.Seq, last)
+		}
+		last = ev.Seq
+		if ev.Kind == api.EventStdout {
+			out.Write(ev.Data)
+		}
+		if ev.Kind == api.EventExit {
+			exit = ev.Exit
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Events() error = %v", err)
+	}
+	return exit, out.String()
 }
 
 // TestAuthentication proves that only the health route works without the
 // credential, and that a wrong credential gets the same safe error.
 func TestAuthentication(t *testing.T) {
-	srv := newTestServer(t)
-	tests := []struct {
-		name  string
-		path  string
-		token string
-		want  int
+	h := newHarness(t, t.TempDir())
+	for _, tt := range []struct {
+		path, token string
+		want        int
 	}{
-		{name: "health without credential", path: "/healthz", want: http.StatusNoContent},
-		{name: "status without credential", path: "/v1/status", want: http.StatusUnauthorized},
-		{name: "status with wrong credential", path: "/v1/status", token: testCredential + "x", want: http.StatusUnauthorized},
-		{name: "unknown route without credential", path: "/v1/machines", want: http.StatusUnauthorized},
-		{name: "status with credential", path: "/v1/status", token: testCredential, want: http.StatusOK},
-		{name: "unknown route with credential", path: "/v1/nothing", token: testCredential, want: http.StatusNotFound},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			resp := get(t, srv.URL+tt.path, tt.token)
-			if resp.StatusCode != tt.want {
-				t.Fatalf("GET %s status = %d, want %d", tt.path, resp.StatusCode, tt.want)
-			}
-			if resp.StatusCode == http.StatusUnauthorized {
-				var body api.ErrorResponse
-				if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-					t.Fatalf("decode error body: %v", err)
-				}
-				if body.Error.Code != api.ErrUnauthorized {
-					t.Errorf("error code = %q, want %q", body.Error.Code, api.ErrUnauthorized)
-				}
-			}
-		})
+		{"/healthz", "", http.StatusNoContent},
+		{"/v1/status", "", http.StatusUnauthorized},
+		{"/v1/status", testCredential + "x", http.StatusUnauthorized},
+		{"/v1/machines", "", http.StatusUnauthorized},
+		{"/v1/status", testCredential, http.StatusOK},
+		{"/v1/nothing", testCredential, http.StatusNotFound},
+	} {
+		req, _ := http.NewRequest(http.MethodGet, h.url+tt.path, nil)
+		if tt.token != "" {
+			req.Header.Set("Authorization", "Bearer "+tt.token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != tt.want {
+			t.Errorf("GET %s (token set %v) status = %d, want %d", tt.path, tt.token != "", resp.StatusCode, tt.want)
+		}
 	}
 }
 
-// TestStatusBody proves that status returns the runtime report as JSON.
-func TestStatusBody(t *testing.T) {
-	srv := newTestServer(t)
-	resp := get(t, srv.URL+"/v1/status", testCredential)
-	var got api.Status
-	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
-		t.Fatalf("decode status: %v", err)
+// TestEphemeralLifecycle proves the caller flow through the real client,
+// server, and manager: image, create, name idempotency, drive upload,
+// start, ordered events, image process defaults, drive download, delete,
+// and proof.
+func TestEphemeralLifecycle(t *testing.T) {
+	h := newHarness(t, t.TempDir())
+	ctx := context.Background()
+	img := h.image(t)
+	spec := api.MachineSpec{Name: "copy-job", Lifecycle: api.Ephemeral, Image: img, TimeoutSeconds: 30,
+		Labels:  map[string]string{"job": "42"},
+		Process: api.Process{Args: []string{"copy"}},
+		Drives:  []api.Drive{{Name: "in", GuestPath: "/in", SizeMiB: 1}, {Name: "out", GuestPath: "/out", SizeMiB: 1, Writable: true}}}
+	m, err := h.c.CreateMachine(ctx, spec)
+	if err != nil {
+		t.Fatalf("CreateMachine() error = %v", err)
 	}
-	if got.Runtime != "test" || !got.Ready {
-		t.Errorf("status = %+v, want runtime test and ready", got)
+	again, err := h.c.CreateMachine(ctx, spec)
+	if err != nil || again.ID != m.ID {
+		t.Errorf("repeated CreateMachine() = %s, %v; want the same machine %s", again.ID, err, m.ID)
+	}
+	other := spec
+	other.TimeoutSeconds = 31
+	if _, err := h.c.CreateMachine(ctx, other); !client.IsCode(err, api.ErrConflict) {
+		t.Errorf("CreateMachine() with a different spec error = %v, want conflict", err)
+	}
+	var in bytes.Buffer
+	tw := tar.NewWriter(&in)
+	_ = tw.WriteHeader(&tar.Header{Name: "f", Mode: 0o644, Size: 5, Typeflag: tar.TypeReg})
+	_, _ = tw.Write([]byte("hello"))
+	_ = tw.Close()
+	if err := h.c.PutDrive(ctx, m.ID, "in", &in); err != nil {
+		t.Fatalf("PutDrive() error = %v", err)
+	}
+	exit, _ := h.runToExit(t, m.ID)
+	if exit == nil || exit.Code != 0 || exit.Reason != api.ExitCompleted {
+		t.Fatalf("exit = %+v, want completed 0", exit)
+	}
+	rc, err := h.c.GetDrive(ctx, m.ID, "out")
+	if err != nil {
+		t.Fatalf("GetDrive() error = %v", err)
+	}
+	tr := tar.NewReader(rc)
+	hdr, err := tr.Next()
+	body, _ := io.ReadAll(tr)
+	_ = rc.Close()
+	if err != nil || hdr.Name != "f" || string(body) != "hello" {
+		t.Errorf("out drive = %v %q, want f with hello", err, body)
+	}
+	if got, err := h.c.ListMachines(ctx, map[string]string{"job": "42"}); err != nil || len(got) != 1 {
+		t.Errorf("ListMachines(job=42) = %d, %v; want 1", len(got), err)
+	}
+	final, err := h.c.DeleteMachine(ctx, m.ID)
+	if err != nil || final.State != api.StateDestroyed || final.Proof == nil || !final.Proof.Destroyed {
+		t.Errorf("DeleteMachine() = %+v, %v; want destroyed with proof", final, err)
+	}
+	if _, err := h.c.GetMachine(ctx, m.ID); !client.IsCode(err, api.ErrNotFound) {
+		t.Errorf("GetMachine() after delete error = %v, want not_found", err)
+	}
+
+	m2, err := h.c.CreateMachine(ctx, api.MachineSpec{Name: "image-default", Lifecycle: api.Ephemeral, Image: img,
+		TimeoutSeconds: 30, Process: api.Process{Env: []string{"B=spec"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, out := h.runToExit(t, m2.ID)
+	if !strings.Contains(out, "from-image") || !strings.Contains(out, "A=image,B=spec") {
+		t.Errorf("stdout = %q, want the image command and merged env", out)
+	}
+}
+
+// TestLimits proves timeout, output limit, redaction, and that a machine
+// cannot be started twice or get drives after start.
+func TestLimits(t *testing.T) {
+	h := newHarness(t, t.TempDir())
+	ctx := context.Background()
+	img := h.image(t)
+	for _, tt := range []struct {
+		name string
+		spec api.MachineSpec
+		want api.ExitReason
+	}{
+		{"timeout", api.MachineSpec{TimeoutSeconds: 1, Process: api.Process{Args: []string{"hang"}}}, api.ExitTimeout},
+		{"output", api.MachineSpec{TimeoutSeconds: 30, OutputLimitBytes: 4096, Process: api.Process{Args: []string{"flood"}}}, api.ExitOutputLimit},
+	} {
+		tt.spec.Name, tt.spec.Lifecycle, tt.spec.Image = tt.name, api.Ephemeral, img
+		m, err := h.c.CreateMachine(ctx, tt.spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		exit, _ := h.runToExit(t, m.ID)
+		if exit == nil || exit.Reason != tt.want {
+			t.Errorf("%s: exit = %+v, want %s", tt.name, exit, tt.want)
+		}
+		if _, err := h.c.StartMachine(ctx, m.ID); !client.IsCode(err, api.ErrConflict) {
+			t.Errorf("%s: second StartMachine() error = %v, want conflict", tt.name, err)
+		}
+		if err := h.c.PutDrive(ctx, m.ID, "x", strings.NewReader("")); err == nil {
+			t.Errorf("%s: PutDrive() after start error = nil", tt.name)
+		}
+	}
+	m, err := h.c.CreateMachine(ctx, api.MachineSpec{Name: "secret", Lifecycle: api.Ephemeral, Image: img, TimeoutSeconds: 30,
+		Process: api.Process{Args: []string{"echo:token=s3cr3t"}}, Redactions: [][]byte{[]byte("s3cr3t")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, out := h.runToExit(t, m.ID); strings.Contains(out, "s3cr3t") || !strings.Contains(out, "[REDACTED]") {
+		t.Errorf("stdout = %q, want the secret redacted", out)
+	}
+}
+
+// TestRestartMarksUnfinishedMachinesFailed proves recovery: a machine that
+// was running when the service stopped is failed after a restart, the
+// runtime is asked to recover, and its events end with an exit.
+func TestRestartMarksUnfinishedMachinesFailed(t *testing.T) {
+	dir := t.TempDir()
+	h := newHarness(t, dir)
+	ctx := context.Background()
+	m, err := h.c.CreateMachine(ctx, api.MachineSpec{Name: "hang", Lifecycle: api.Ephemeral, Image: h.image(t), TimeoutSeconds: 60,
+		Process: api.Process{Args: []string{"hang"}}, Start: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2 := newHarness(t, dir)
+	if h2.rt.recovered != 1 {
+		t.Errorf("Recover() calls = %d, want 1", h2.rt.recovered)
+	}
+	got, err := h2.c.GetMachine(ctx, m.ID)
+	if err != nil || got.State != api.StateFailed || got.Exit == nil || got.Exit.Reason != api.ExitFailed {
+		t.Fatalf("machine after restart = %+v, %v; want failed", got, err)
+	}
+	var kinds []string
+	_ = h2.c.Events(ctx, m.ID, 0, false, func(ev api.Event) error {
+		kinds = append(kinds, string(ev.Kind))
+		return nil
+	})
+	if len(kinds) == 0 || kinds[len(kinds)-1] != string(api.EventExit) {
+		t.Errorf("events after restart = %v, want a final exit", kinds)
 	}
 }
 

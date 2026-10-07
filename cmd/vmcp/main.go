@@ -2,7 +2,7 @@
 //
 // Usage:
 //
-//	vmcp serve --listen ADDR --credential-file PATH
+//	vmcp serve [flags]
 //	vmcp healthcheck [--url URL]
 package main
 
@@ -15,18 +15,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/jaredfolkins/vmcp/internal/machine"
 	"github.com/jaredfolkins/vmcp/internal/server"
-	"github.com/jaredfolkins/vmcp/runtimes/firecracker"
 )
 
 const (
-	defaultListen         = ":8080"
-	defaultCredentialFile = "/run/secrets/vmcp-credential"
-	defaultHealthURL      = "http://127.0.0.1:8080/healthz"
-	shutdownTimeout       = 10 * time.Second
+	defaultHealthURL = "http://127.0.0.1:8080/healthz"
+	shutdownTimeout  = 10 * time.Second
 )
 
 func main() {
@@ -52,30 +51,41 @@ func run(args []string, log *slog.Logger) error {
 }
 
 func serve(args []string, log *slog.Logger) error {
+	var rf runtimeFlags
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	listen := fs.String("listen", defaultListen, "listen address on the service network")
-	credentialFile := fs.String("credential-file", defaultCredentialFile, "owner-private file with the caller bearer credential")
+	listen := fs.String("listen", ":8080", "listen address on the private service network")
+	credentialFile := fs.String("credential-file", "/run/secrets/vmcp-credential", "owner-private file with the caller bearer credential")
+	maxMachines := fs.Int("max-machines", 16, "machines that may hold a slot at once")
+	rf.register(fs)
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := requireNoNewPrivs(); err != nil {
 		return err
 	}
 	credential, err := server.LoadCredential(*credentialFile)
 	if err != nil {
 		return err
 	}
-	host := firecracker.DefaultHost
-	srv := &http.Server{
-		Addr:              *listen,
-		Handler:           server.New(server.Config{Credential: credential, Status: host.Status, Logger: log}),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	rt, stateRoot, err := newRuntime(ctx, rf, log)
+	if err != nil {
+		return err
+	}
+	mgr, err := machine.New(ctx, rt, machine.Config{Dir: stateRoot, MaxMachines: *maxMachines, Logger: log})
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{
+		Addr:              *listen,
+		Handler:           server.New(server.Config{Credential: credential, Service: mgr, Logger: log}),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
-	st := host.Status()
+	st := mgr.Status()
 	log.Info("vmcp serving", "listen", *listen, "runtime", st.Runtime, "release", st.Release, "ready", st.Ready)
-
 	select {
 	case err := <-errc:
 		return fmt.Errorf("serve: %w", err)
@@ -88,6 +98,22 @@ func serve(args []string, log *slog.Logger) error {
 	}
 	log.Info("vmcp stopped")
 	return nil
+}
+
+// requireNoNewPrivs refuses to run unless no_new_privs is set. Every
+// jailer and VMM process inherits it. Run the container with
+// no-new-privileges.
+func requireNoNewPrivs() error {
+	b, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return fmt.Errorf("read process status: %w", err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(line, "NoNewPrivs:"); ok && strings.TrimSpace(v) == "1" {
+			return nil
+		}
+	}
+	return errors.New("vmcp needs no_new_privs; run it with the no-new-privileges security option")
 }
 
 // healthcheck exits with an error unless the health route answers 204.

@@ -21,6 +21,7 @@ import (
 	"github.com/tailscale/hujson"
 
 	"github.com/jaredfolkins/vmcp/api"
+	"github.com/jaredfolkins/vmcp/internal/machine"
 )
 
 var liveConfig = flag.String("vmcp-live-config", "", "HuJSON file for the Firecracker live gate")
@@ -154,7 +155,7 @@ func TestLiveFirecracker(t *testing.T) {
 	})
 }
 
-func runLive(t *testing.T, ctx context.Context, rt *Runtime, id string, slot int, spec api.MachineSpec, user string) (*recorder, Result, string) {
+func runLive(t *testing.T, ctx context.Context, rt *Runtime, id string, slot int, spec api.MachineSpec, user string) (*recorder, machine.Result, string) {
 	t.Helper()
 	dir := filepath.Join(rt.machinesDir(), id)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -165,7 +166,7 @@ func runLive(t *testing.T, ctx context.Context, rt *Runtime, id string, slot int
 	if spec.Resources.MemoryMiB == 0 {
 		spec.Resources = api.Resources{VCPUs: 1, MemoryMiB: 256, DiskMiB: 256}
 	}
-	m, err := rt.Provision(ctx, LaunchSpec{
+	m, err := rt.Provision(ctx, machine.Launch{
 		ID: id, Slot: slot, Dir: dir, ImageID: "img-live", Spec: spec,
 		Args: spec.Process.Args, Env: []string{"PATH=/bin:/usr/bin:/sbin:/usr/sbin"}, WorkDir: "/", User: user, Sink: rec,
 	})
@@ -191,7 +192,7 @@ func runLive(t *testing.T, ctx context.Context, rt *Runtime, id string, slot int
 	return rec, res, dir
 }
 
-func checkProof(t *testing.T, rt *Runtime, res Result) {
+func checkProof(t *testing.T, rt *Runtime, res machine.Result) {
 	t.Helper()
 	p := res.Proof
 	if !p.Destroyed || p.TeardownStatus != "destroyed" {

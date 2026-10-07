@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/jaredfolkins/vmcp/api"
+	"github.com/jaredfolkins/vmcp/internal/machine"
 	"github.com/jaredfolkins/vmcp/runtimes/firecracker/internal/image"
 )
 
@@ -183,17 +184,14 @@ func (r *Runtime) Status() api.Status {
 	return st
 }
 
-// ImageMeta is a prepared image.
-type ImageMeta = image.Meta
-
 // PrepareImage builds a prepared image in its own directory under the state
 // root.
-func (r *Runtime) PrepareImage(ctx context.Context, id string, req api.ImageRequest) (ImageMeta, error) {
+func (r *Runtime) PrepareImage(ctx context.Context, id string, req api.ImageRequest) (machine.ImageInfo, error) {
 	plat := image.Platform{OS: "linux", Architecture: "amd64"}
 	if req.Platform != "" && req.Platform != "linux/amd64" {
-		return ImageMeta{}, fmt.Errorf("platform %q is not supported", req.Platform)
+		return machine.ImageInfo{}, fmt.Errorf("platform %q is not supported", req.Platform)
 	}
-	return image.Prepare(ctx, r.cfg.HTTP, filepath.Join(r.imagesDir(), id), image.Request{
+	meta, err := image.Prepare(ctx, r.cfg.HTTP, filepath.Join(r.imagesDir(), id), image.Request{
 		Ref:           req.Ref,
 		Registry:      req.Registry.URL,
 		RegistryToken: req.Registry.Token,
@@ -201,6 +199,18 @@ func (r *Runtime) PrepareImage(ctx context.Context, id string, req api.ImageRequ
 		AgentPath:     r.cfg.AgentPath,
 		MaxBytes:      4 << 30,
 	})
+	if err != nil {
+		return machine.ImageInfo{}, err
+	}
+	p := meta.Process
+	return machine.ImageInfo{
+		ImageDigest:   meta.ImageDigest,
+		Compatibility: meta.Compatibility,
+		SizeBytes:     meta.SizeBytes,
+		Process: machine.ProcessConfig{
+			Entrypoint: p.Entrypoint, Cmd: p.Cmd, Env: p.Env, WorkingDir: p.WorkingDir, User: p.User,
+		},
+	}, nil
 }
 
 // ImageDir is the directory of a prepared image.
@@ -208,3 +218,35 @@ func (r *Runtime) ImageDir(id string) string { return filepath.Join(r.imagesDir(
 
 // DeleteImage removes a prepared image.
 func (r *Runtime) DeleteImage(id string) error { return os.RemoveAll(r.ImageDir(id)) }
+
+// Recover kills and removes every machine cgroup, jail, and tap that this
+// install left. It touches only resources under the vmcp parent cgroup, the
+// vmcp jail base, and taps that carry this install tag.
+func (r *Runtime) Recover(ctx context.Context) error {
+	var errs []error
+	entries, err := os.ReadDir(r.cgroupParent())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		errs = append(errs, err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "vmcp-") {
+			continue
+		}
+		p := filepath.Join(r.cgroupParent(), e.Name())
+		errs = append(errs, killCgroup(p), removeCgroup(p))
+	}
+	jails := filepath.Join(r.cfg.JailBase, "firecracker")
+	if entries, err = os.ReadDir(jails); err == nil {
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "vmcp-") {
+				errs = append(errs, os.RemoveAll(filepath.Join(jails, e.Name())))
+			}
+		}
+	}
+	taps, err := ownedTaps(ctx, r.cfg.InstallID)
+	errs = append(errs, err)
+	for _, t := range taps {
+		errs = append(errs, run(ctx, nil, "ip", "link", "del", "dev", t))
+	}
+	return errors.Join(errs...)
+}
