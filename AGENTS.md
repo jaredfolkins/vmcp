@@ -31,6 +31,10 @@
 - The self-test boots a machine from a built-in agent-only image. The guest
   proves that the vmcp port, metadata, private and direct destinations are
   unreachable and that the egress broker refuses metadata.
+- Logging and tracing follow [Logging And Tracing](#logging-and-tracing):
+  `--log-level`, one request line per API call, W3C `traceparent`
+  continuation, spans, and machine lifecycle lines that keep the caller
+  trace.
 - `client/` is the Go client. `internal/machine` is the runtime-neutral
   manager. `runtimes/firecracker` is the Firecracker runtime with its guest
   agent, image preparation, network, Go brokers, and posture checks.
@@ -414,10 +418,8 @@ device node other than the ones the jailer creates.
   metadata, container bridges, and every other host service.
 - Never expose a Docker socket, host networking, host PID namespace, host
   root, broad mounts, or catch-all NAT to a guest.
-- Never log arbitrary error text, tokens, request bodies, secret file
-  bodies, private file contents, exec or console content, or raw guest
-  output. Clear secret bytes after use. Apply `redactions` before an event
-  leaves vmcp.
+- Follow [Never log](#never-log). Clear secret bytes after use. Apply
+  `redactions` before an event leaves vmcp.
 - A change to a runtime, networking, brokers, ports, exec, console,
   snapshots, install, teardown, cleanup, or credentials needs the runtime's
   Linux/KVM live gate. Unit tests do not replace it.
@@ -431,6 +433,7 @@ api/                                public HTTP contract
 client/                             Go client for callers (V2)
 cmd/vmcp/                           serve, healthcheck, and install commands
 internal/server/                    HTTP server and authentication
+internal/trace/                     W3C trace context, spans, and the log handler
 internal/install/                   teardown-first install transaction (V4)
 runtimes/firecracker/               Firecracker runtime (linux)
 runtimes/firecracker/release/       baked Firecracker and jailer, lock, licenses
@@ -507,12 +510,87 @@ Paths on the left are in `../letemcook-private`.
 - Add a dependency only when moved code already uses it or no current owner
   can do the work.
 
-## Logging
-- Use structured JSON `slog`. Emit one primary diagnostic where an error is
-  handled. Wrap and return errors at lower layers.
-- Use fixed safe codes and bounded facts. Correlate with the machine,
-  image, snapshot, exec session, and install operation identities.
-- Required failure evidence must work at production `INFO`.
+## Logging And Tracing
+The vmcp log is the debugging record. A person who reads only the log must
+be able to answer: what did the caller ask, what did vmcp do, how long did
+each step take, what is the state now, and why did it fail. Every change
+keeps that true.
+
+### Format
+- One JSON object per line from `slog` to stderr. The container runtime
+  keeps it as the vmcp log. `vmcp serve --log-level` selects the minimum
+  level: `debug`, `info` (the default), `warn`, or `error`.
+- The logger is `trace.NewHandler` over the JSON handler. It adds
+  `trace_id` and `span_id` to each record whose context carries a span.
+  Log with the `slog` `Context` methods. Never add trace attributes by hand.
+- Every `WARN` and `ERROR` line has a fixed `code`. A failure line has an
+  `error` attribute with the cause, cut by `trace.BoundedError`.
+- Use these attribute names: `machine`, `machine_name`, `image`,
+  `snapshot`, `exec_session`, `install_op`, `drive`, `upstream`, `route`,
+  `status`, `duration_ms`, and `code`. Durations are milliseconds from
+  `trace.Millis`.
+
+### Levels
+- `ERROR`: an operation failed and an operator must act, or a security
+  control fired. Examples: an internal API error, a teardown that left a
+  resource, an enforcer or posture violation, a restored `vmcp` table, and
+  a failed self-test run.
+- `WARN`: a recoverable or caller-caused failure, or a degraded state.
+  Examples: a rejected credential, an image, provision, or boot failure, a
+  failed self-test result, an output limit, a failed teardown step, a
+  machine failed by a vmcp restart, and a failed upstream request.
+- `INFO`: lifecycle and every API call. Examples: start and stop with the
+  configuration, one line per API request, image prepared or deleted,
+  machine created, started, guest agent connected, ended, and deleted,
+  recovery, the self-test result, and each refused guest destination.
+- `DEBUG`: each step and its duration. Examples: span lines, provisioning
+  steps, the jailer start, posture, kill, allowed egress, upstream
+  responses, drive transfers, and health and readiness probes.
+- Required failure evidence works at `INFO`. `DEBUG` explains the steps.
+  Do not log the same failure at every layer. Wrap and return errors; log
+  once where the error is handled.
+
+### Tracing
+- Each API request runs in a span. vmcp continues the caller's W3C
+  `traceparent` header (`api.HeaderTraceparent`) and starts a new trace when
+  the header is missing or invalid. Each response returns the request span
+  in `traceparent`. The Go client sends the value from
+  `client.WithTraceparent`, and `client.Error.TraceID` names the vmcp trace
+  of a failed call.
+- The request line (`msg` `api request`) is the record of the request
+  span: route, status, bytes, duration, error code, and cause.
+- Work that outlives the request (boot, the guest process, timeouts,
+  teardown, brokers, and enforcer actions on the machine) logs with
+  `trace.Detach` of the request context. Its lines keep the trace of the
+  request that created or started the machine.
+- Start a span with `trace.Start` for each step that can fail or that takes
+  more than about 10 ms. `Span.End` writes one `DEBUG` line with the span
+  name, parent, duration, and outcome.
+- Background work without a caller (startup recovery, enforcer sweeps)
+  starts its own trace.
+- LEMC sends one trace per job. One `trace_id` then finds the job in the
+  LEMC log and in the vmcp log.
+
+### New features
+- A change that adds a route, a runtime operation, a broker, an install
+  step, or a background loop names in the same change: its spans, its
+  `INFO` lifecycle lines, its `WARN` and `ERROR` codes, and its
+  correlation attributes.
+- Its boundary test captures the log of the main flow and of the main
+  failure. It checks the levels, the codes, and that the lines carry the
+  caller trace. `internal/server/logging_test.go` is the example.
+- Review question: can a person find and explain a failure of each new
+  step from the log at `INFO`, and see each step with its duration at
+  `DEBUG`?
+
+### Never log
+- Tokens, credentials, request or response bodies, environment values,
+  secret files, drive or file contents, exec or console content, or guest
+  output.
+- Guest-supplied text, such as a guest host name, path, or drive name, in
+  raw form. Log only checked values (see `logHost`) or vmcp's own names.
+- An error that wraps any of these. Build errors from safe facts only, and
+  strip URLs with queries from network errors before logging.
 
 ## Tests And Validation
 - Test a named behavior or contract. State what the test proves and which

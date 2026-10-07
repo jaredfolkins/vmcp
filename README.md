@@ -39,6 +39,10 @@ One vmcp binary serves one runtime: the runtime of the OS it is built for.
   spec. Host and private networks and cloud metadata are always denied.
 - **Tokens stay on the host.** An upstream token in a request is used only
   by a host broker. It never enters a guest and is never returned or logged.
+- **Debuggable log.** One JSON line per API call and per machine step.
+  vmcp continues the caller's W3C `traceparent`, so one trace ID finds a
+  request and every machine step that it started. `--log-level` selects
+  `debug`, `info`, `warn`, or `error`.
 - **Install tears down first.** Every install, upgrade, and rollback removes
   everything that vmcp owns except the state needed to upgrade, then installs
   again and verifies with real machines.
@@ -137,6 +141,7 @@ client/                  Go client
 cmd/vmcp/                vmcp serve and vmcp healthcheck
 internal/machine/        runtime-neutral machine manager
 internal/server/         HTTP server and authentication
+internal/trace/          W3C trace context, spans, and the log handler
 e2e/                     end-to-end tests against a running vmcp
 runtimes/firecracker/    Firecracker runtime, baked release, installers
 Dockerfile               Linux service image

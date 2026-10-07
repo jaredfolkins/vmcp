@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jaredfolkins/vmcp/api"
+	"github.com/jaredfolkins/vmcp/internal/trace"
 )
 
 // Error is a manager error with a fixed API code and a safe message.
@@ -76,6 +77,12 @@ type Manager struct {
 }
 
 type entry struct {
+	// log is the machine logger. traceCtx carries the trace of the request
+	// that created or started the machine; lines about the machine log with
+	// it.
+	log        *slog.Logger
+	traceCtx   context.Context
+	startedAt  time.Time
 	sink       *sink
 	rec        record
 	inst       Instance
@@ -112,12 +119,18 @@ func New(ctx context.Context, rt Runtime, cfg Config) (*Manager, error) {
 			return nil, err
 		}
 	}
+	ctx, span := trace.Start(ctx, m.log, "recover")
 	if err := rt.Recover(ctx); err != nil {
+		span.End(err)
 		return nil, fmt.Errorf("recover runtime resources: %w", err)
 	}
-	if err := m.load(); err != nil {
+	failed, err := m.load(ctx)
+	span.End(err)
+	if err != nil {
 		return nil, err
 	}
+	m.log.InfoContext(ctx, "recovery finished", "machines", len(m.machines), "failed_by_restart", failed,
+		"images", len(m.images), "duration_ms", trace.Millis(span.Elapsed()))
 	return m, nil
 }
 
@@ -128,7 +141,10 @@ func (m *Manager) machineDir(id string) string {
 	return filepath.Join(m.workDir(), id)
 }
 
-func (m *Manager) load() error {
+// load reads every record. A machine that an earlier process left running
+// becomes failed. It returns the number of such machines.
+func (m *Manager) load(ctx context.Context) (int, error) {
+	failed := 0
 	imgs, _ := os.ReadDir(m.imageRecordsDir())
 	for _, e := range imgs {
 		var img api.Image
@@ -144,7 +160,7 @@ func (m *Manager) load() error {
 		}
 		ev, err := loadEventLog(filepath.Join(m.machineDir(rec.Machine.ID), "events.ndjson"))
 		if err != nil {
-			return err
+			return failed, err
 		}
 		en := &entry{rec: rec, events: ev, finished: make(chan struct{})}
 		switch rec.Machine.State {
@@ -154,13 +170,16 @@ func (m *Manager) load() error {
 			en.rec.Machine.UpdatedAt = time.Now().UTC()
 			_ = ev.append(api.Event{Kind: api.EventExit, Exit: en.rec.Machine.Exit})
 			_ = m.save(en)
+			failed++
+			m.log.WarnContext(ctx, "machine failed by vmcp restart", "code", "machine_recovered_failed",
+				"machine", rec.Machine.ID, "machine_name", rec.Machine.Name)
 		}
 		ev.close()
 		close(en.finished)
 		m.machines[rec.Machine.ID] = en
 		m.names[rec.Machine.Name] = rec.Machine.ID
 	}
-	return nil
+	return failed, nil
 }
 
 // Status reports the runtime status and the machine count.
@@ -195,15 +214,20 @@ func (m *Manager) CreateImage(ctx context.Context, req api.ImageRequest) (api.Im
 	m.mu.Unlock()
 	lock.Lock()
 	defer lock.Unlock()
+	log := m.log.With("image", id)
 	m.mu.Lock()
 	if img := m.images[id]; img != nil {
 		m.mu.Unlock()
+		log.DebugContext(ctx, "image reused", "image_digest", img.ImageDigest)
 		return *img, nil
 	}
 	m.mu.Unlock()
+	ctx, span := trace.Start(ctx, log, "image.prepare")
 	info, err := m.rt.PrepareImage(ctx, id, req)
+	span.End(err)
 	if err != nil {
-		m.log.Warn("image prepare failed", "image", id, "code", "image_prepare_failed")
+		log.WarnContext(ctx, "image prepare failed", "code", "image_prepare_failed", "ref", req.Ref,
+			"duration_ms", trace.Millis(span.Elapsed()), "error", trace.BoundedError(err))
 		return api.Image{}, errorf(api.ErrInvalidRequest, "image could not be prepared: %s", safeDetail(err))
 	}
 	img := api.Image{ID: id, Ref: req.Ref, ImageDigest: info.ImageDigest, Compatibility: info.Compatibility,
@@ -214,6 +238,8 @@ func (m *Manager) CreateImage(ctx context.Context, req api.ImageRequest) (api.Im
 	m.mu.Lock()
 	m.images[id] = &img
 	m.mu.Unlock()
+	log.InfoContext(ctx, "image prepared", "ref", req.Ref, "image_digest", img.ImageDigest, "size_bytes", img.SizeBytes,
+		"duration_ms", trace.Millis(span.Elapsed()))
 	return img, nil
 }
 
@@ -246,7 +272,7 @@ func (m *Manager) Images() []api.Image {
 }
 
 // DeleteImage removes an image that no live machine uses.
-func (m *Manager) DeleteImage(id string) error {
+func (m *Manager) DeleteImage(ctx context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.images[id] == nil {
@@ -262,6 +288,7 @@ func (m *Manager) DeleteImage(id string) error {
 	}
 	_ = os.Remove(filepath.Join(m.imageRecordsDir(), id+".json"))
 	delete(m.images, id)
+	m.log.InfoContext(ctx, "image deleted", "image", id)
 	return nil
 }
 
@@ -299,6 +326,8 @@ func (m *Manager) CreateMachine(ctx context.Context, spec api.MachineSpec) (api.
 	id := newID()
 	now := time.Now().UTC()
 	en := &entry{
+		log:      m.log.With("machine", id, "machine_name", spec.Name),
+		traceCtx: trace.Detach(ctx),
 		rec: record{
 			Machine: api.Machine{ID: id, Name: spec.Name, Lifecycle: spec.Lifecycle, Labels: spec.Labels,
 				Image: spec.Image, State: api.StateCreated, CreatedAt: now, UpdatedAt: now},
@@ -319,6 +348,10 @@ func (m *Manager) CreateMachine(ctx context.Context, spec api.MachineSpec) (api.
 		return api.Machine{}, err
 	}
 	_ = en.events.append(api.Event{Kind: api.EventState, State: api.StateCreated})
+	en.log.InfoContext(ctx, "machine created", "image", spec.Image, "lifecycle", spec.Lifecycle, "slot", slot,
+		"timeout_s", spec.TimeoutSeconds, "vcpus", spec.Resources.VCPUs, "memory_mib", spec.Resources.MemoryMiB,
+		"drives", len(spec.Drives), "files", len(spec.Files), "dns", spec.Network.DNS,
+		"public_egress", spec.Network.PublicEgress, "upstreams", len(spec.Network.Upstreams), "labels", spec.Labels)
 	if spec.Start {
 		return m.StartMachine(ctx, id)
 	}
@@ -426,7 +459,7 @@ func (m *Manager) Machines(labels map[string]string) []api.Machine {
 }
 
 // PutDrive replaces the input of a drive before the machine starts.
-func (m *Manager) PutDrive(id, name string, r io.Reader) error {
+func (m *Manager) PutDrive(ctx context.Context, id, name string, r io.Reader) error {
 	m.mu.Lock()
 	en := m.machines[id]
 	if en == nil {
@@ -451,15 +484,30 @@ func (m *Manager) PutDrive(id, name string, r io.Reader) error {
 	if err := os.RemoveAll(dir); err != nil {
 		return err
 	}
-	if err := extractTar(r, dir, size); err != nil {
+	_, span := trace.Start(ctx, m.log, "drive.put")
+	cr := &countingReader{r: r}
+	err := extractTar(cr, dir, size)
+	span.End(err, "machine", id, "drive", name, "bytes", cr.n)
+	if err != nil {
 		_ = os.RemoveAll(dir)
 		return errorf(api.ErrInvalidRequest, "drive tar is invalid: %s", safeDetail(err))
 	}
 	return nil
 }
 
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
 // GetDrive opens the tar of a writable drive after the machine stopped.
-func (m *Manager) GetDrive(id, name string) (*os.File, error) {
+func (m *Manager) GetDrive(_ context.Context, id, name string) (*os.File, error) {
 	m.mu.Lock()
 	en := m.machines[id]
 	m.mu.Unlock()
@@ -493,33 +541,46 @@ func (m *Manager) StartMachine(ctx context.Context, id string) (api.Machine, err
 		return api.Machine{}, errorf(api.ErrConflict, "machine is %s", mach.State)
 	}
 	en.rec.Machine.State = api.StateRunning
+	en.traceCtx = trace.Detach(ctx)
+	en.startedAt = time.Now()
+	log := en.log
 	m.mu.Unlock()
 	spec := m.secrets.take(id)
 	if spec == nil {
+		log.WarnContext(ctx, "machine start refused", "code", "start_secrets_gone")
 		return api.Machine{}, m.fail(en, "start secrets are gone; recreate the machine")
 	}
 	launch, err := m.launch(en, *spec)
 	if err != nil {
+		log.WarnContext(ctx, "machine start refused", "code", "launch_invalid", "error", trace.BoundedError(err))
 		return api.Machine{}, m.fail(en, safeDetail(err))
 	}
 	m.mu.Lock()
 	en.sink, _ = launch.Sink.(*sink)
 	m.mu.Unlock()
-	inst, err := m.rt.Provision(ctx, launch)
+	pctx, span := trace.Start(ctx, log, "machine.provision")
+	launch.Logger = log
+	inst, err := m.rt.Provision(pctx, launch)
 	clearSpec(spec)
+	provisionMS := trace.Millis(span.End(err))
 	if err != nil {
-		m.log.Warn("machine provision failed", "machine", id, "code", "provision_failed")
+		log.WarnContext(ctx, "machine provision failed", "code", "provision_failed", "duration_ms", provisionMS,
+			"error", trace.BoundedError(err))
 		return api.Machine{}, m.fail(en, "provision failed: "+safeDetail(err))
 	}
 	m.mu.Lock()
 	en.inst = inst
 	m.mu.Unlock()
-	if err := inst.Boot(ctx); err != nil {
-		m.log.Warn("machine boot failed", "machine", id, "code", "boot_failed")
+	bctx, span := trace.Start(ctx, log, "machine.boot")
+	err = inst.Boot(bctx)
+	bootMS := trace.Millis(span.End(err))
+	if err != nil {
+		log.WarnContext(ctx, "machine boot failed", "code", "boot_failed", "duration_ms", bootMS, "error", trace.BoundedError(err))
 		res := inst.Destroy(ctx, "boot-failed")
 		m.finish(en, res)
 		return m.Machine(id)
 	}
+	log.InfoContext(ctx, "machine started", "provision_ms", provisionMS, "boot_ms", bootMS)
 	_ = m.save(en)
 	_ = en.events.append(api.Event{Kind: api.EventState, State: api.StateRunning})
 	timeout := time.Duration(en.rec.Spec.TimeoutSeconds) * time.Second
@@ -605,13 +666,14 @@ func mergeEnv(base, over []string) []string {
 }
 
 // StopMachine stops a running machine.
-func (m *Manager) StopMachine(id string) (api.Machine, error) {
+func (m *Manager) StopMachine(ctx context.Context, id string) (api.Machine, error) {
 	m.mu.Lock()
 	en := m.machines[id]
 	m.mu.Unlock()
 	if en == nil {
 		return api.Machine{}, errorf(api.ErrNotFound, "machine not found")
 	}
+	m.log.InfoContext(ctx, "machine stop requested", "machine", id)
 	m.kill(en, "stopped")
 	return m.Machine(id)
 }
@@ -664,6 +726,7 @@ func (m *Manager) DeleteMachine(ctx context.Context, id string) (api.Machine, er
 	m.mu.Unlock()
 	_ = os.RemoveAll(m.machineDir(id))
 	_ = os.Remove(filepath.Join(m.recordsDir(), id+".json"))
+	m.log.InfoContext(ctx, "machine deleted", "machine", id, "machine_name", final.Name)
 	return final, nil
 }
 
@@ -704,6 +767,11 @@ func (m *Manager) finish(en *entry, res Result) {
 	}
 	close(en.finished)
 	snk := en.sink
+	log, logCtx, state, killReason, output := en.log, en.traceCtx, en.rec.Machine.State, en.killReason, en.output
+	var runMS float64
+	if !en.startedAt.IsZero() {
+		runMS = trace.Millis(time.Since(en.startedAt))
+	}
 	m.mu.Unlock()
 	if snk != nil {
 		snk.clear()
@@ -711,6 +779,31 @@ func (m *Manager) finish(en *entry, res Result) {
 	_ = m.save(en)
 	_ = en.events.append(api.Event{Kind: api.EventExit, Exit: exit, State: en.rec.Machine.State})
 	en.events.close()
+	if log == nil {
+		log = m.log.With("machine", en.rec.Machine.ID, "machine_name", en.rec.Machine.Name)
+	}
+	if logCtx == nil {
+		logCtx = context.Background()
+	}
+	level, code := slog.LevelInfo, ""
+	switch {
+	case !proof.Destroyed || proof.TeardownStatus != "destroyed":
+		level, code = slog.LevelError, "teardown_incomplete"
+	case state == api.StateFailed:
+		level, code = slog.LevelWarn, "machine_failed"
+	}
+	attrs := []any{"state", state, "exit_reason", exit.Reason, "exit_code", exit.Code, "run_ms", runMS,
+		"output_bytes", output, "destroy_reason", proof.DestroyReason, "teardown_status", proof.TeardownStatus}
+	if exit.Detail != "" {
+		attrs = append(attrs, "exit_detail", exit.Detail)
+	}
+	if killReason != "" {
+		attrs = append(attrs, "kill_reason", killReason)
+	}
+	if code != "" {
+		attrs = append(attrs, "code", code)
+	}
+	log.Log(logCtx, level, "machine ended", attrs...)
 }
 
 func finalExit(killReason string, res Result) *api.Exit {
@@ -757,6 +850,7 @@ type sink struct {
 	en         *entry
 	redactions [][]byte
 	limit      int64
+	limitHit   bool
 	mu         sync.Mutex
 }
 
@@ -771,6 +865,10 @@ func (s *sink) Event(ev api.Event) {
 		}
 		s.en.output += int64(len(ev.Data))
 		if s.en.output > s.limit {
+			if !s.limitHit {
+				s.limitHit = true
+				s.en.log.WarnContext(s.en.traceCtx, "machine output limit reached", "code", "output_limit", "limit_bytes", s.limit)
+			}
 			s.m.kill(s.en, "output-limit")
 			return
 		}
@@ -829,6 +927,32 @@ const selfTestImage = "img-selftest"
 func (m *Manager) SelfTest(ctx context.Context) (api.SelfTestResult, error) {
 	m.selfTestMu.Lock()
 	defer m.selfTestMu.Unlock()
+	ctx, span := trace.Start(ctx, m.log, "selftest")
+	res, err := m.selfTest(ctx)
+	span.End(err)
+	attrs := []any{"passed", res.Passed, "duration_ms", trace.Millis(span.Elapsed())}
+	if res.Proof.MachineID != "" {
+		attrs = append(attrs, "machine", res.Proof.MachineID)
+	}
+	switch {
+	case err != nil:
+		m.log.ErrorContext(ctx, "self-test failed", append(attrs, "code", "selftest_error", "error", trace.BoundedError(err))...)
+	case !res.Passed:
+		m.log.WarnContext(ctx, "self-test failed", append(attrs, "code", "selftest_failed", "detail", bounded(res.Detail, 512))...)
+	default:
+		m.log.InfoContext(ctx, "self-test passed", attrs...)
+	}
+	return res, err
+}
+
+func bounded(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+func (m *Manager) selfTest(ctx context.Context) (api.SelfTestResult, error) {
 	info, err := m.rt.PrepareSelfTestImage(ctx, selfTestImage)
 	if err != nil {
 		return api.SelfTestResult{Detail: "self-test image could not be prepared: " + safeDetail(err)}, nil

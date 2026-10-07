@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jaredfolkins/vmcp/api"
+	"github.com/jaredfolkins/vmcp/internal/trace"
 )
 
 const (
@@ -52,7 +53,9 @@ var DefaultDenyPrefixes = []netip.Prefix{
 type brokerConfig struct {
 	DNSUpstreams []string
 	Deny         []netip.Prefix
-	Log          *slog.Logger
+	// Log is the machine logger. TraceCtx carries the machine trace.
+	Log      *slog.Logger
+	TraceCtx context.Context
 }
 
 // brokers are the services of one machine on its host address.
@@ -111,12 +114,12 @@ func startBrokers(n api.Network, host netip.Addr, cfg brokerConfig) (*brokers, e
 				return err
 			}
 			b.track(ln)
-			e := &egress{resolver: resolver, deny: cfg.Deny, b: b, log: cfg.Log}
+			e := &egress{resolver: resolver, deny: cfg.Deny, b: b, log: cfg.Log, logCtx: cfg.TraceCtx}
 			srv := &http.Server{Handler: e, ReadHeaderTimeout: headerTimeout, ConnState: b.connState}
 			go func() { _ = srv.Serve(ln) }()
 		}
 		for i, u := range n.Upstreams {
-			h, err := upstreamHandler(u)
+			h, err := upstreamHandler(u, cfg.Log, cfg.TraceCtx)
 			if err != nil {
 				return err
 			}
@@ -329,6 +332,7 @@ type egress struct {
 	deny     []netip.Prefix
 	b        *brokers
 	log      *slog.Logger
+	logCtx   context.Context
 }
 
 func (e *egress) allowed(ip netip.Addr) bool {
@@ -344,11 +348,20 @@ func (e *egress) allowed(ip netip.Addr) bool {
 	return true
 }
 
-// dial connects to host:port through the first allowed address.
+// dial connects to host:port through the first allowed address. It logs a
+// refused destination at INFO and an allowed one at DEBUG.
 func (e *egress) dial(ctx context.Context, hostport string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(hostport)
 	if err != nil {
 		return nil, err
+	}
+	deny := func(reason string, ip netip.Addr) (net.Conn, error) {
+		attrs := []any{"code", "egress_denied", "reason", reason, "host", logHost(host), "port", logHost(port)}
+		if ip.IsValid() {
+			attrs = append(attrs, "ip", ip.String())
+		}
+		e.log.InfoContext(e.logCtx, "egress denied", attrs...)
+		return nil, errDenied
 	}
 	var addrs []netip.Addr
 	if ip, err := netip.ParseAddr(host); err == nil {
@@ -357,19 +370,42 @@ func (e *egress) dial(ctx context.Context, hostport string) (net.Conn, error) {
 		rctx, cancel := context.WithTimeout(ctx, dnsTimeout)
 		defer cancel()
 		if addrs, err = e.resolver.LookupNetIP(rctx, "ip4", host); err != nil {
-			return nil, errDenied
+			return deny("not_resolvable", netip.Addr{})
 		}
 	}
 	for _, ip := range addrs {
 		if !e.allowed(ip) {
-			return nil, errDenied
+			return deny("address_not_public", ip)
 		}
 	}
 	if len(addrs) == 0 {
-		return nil, errDenied
+		return deny("no_address", netip.Addr{})
 	}
 	d := net.Dialer{Timeout: dialTimeout}
-	return d.DialContext(ctx, "tcp", net.JoinHostPort(addrs[0].String(), port))
+	c, err := d.DialContext(ctx, "tcp", net.JoinHostPort(addrs[0].String(), port))
+	if err != nil {
+		e.log.InfoContext(e.logCtx, "egress connect failed", "code", "egress_connect_failed", "host", logHost(host),
+			"port", logHost(port), "ip", addrs[0].String(), "error", trace.BoundedError(err))
+		return nil, err
+	}
+	e.log.DebugContext(e.logCtx, "egress allowed", "host", logHost(host), "port", logHost(port), "ip", addrs[0].String())
+	return c, nil
+}
+
+// logHost returns a guest-supplied host name or port for a log line. A
+// value that is not a plain DNS name, address, or port is replaced, so that
+// guest text never reaches the log.
+func logHost(v string) string {
+	if v == "" || len(v) > 253 {
+		return "invalid"
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '.' && c != '-' && c != ':' && c != '_' {
+			return "invalid"
+		}
+	}
+	return v
 }
 
 var errDenied = errors.New("destination is not allowed")
@@ -472,7 +508,11 @@ func closeWrite(c net.Conn) {
 // upstreamHandler proxies to one upstream URL. It removes guest
 // credentials, adds the upstream token, and allows only GET and HEAD
 // unless writes are allowed.
-func upstreamHandler(u api.Upstream) (http.Handler, error) {
+// upstreamHandler proxies guest requests to one upstream with its token.
+// It logs a refused request at INFO, a failed one at WARN, and each
+// response status at DEBUG. It never logs the token, the path, or the
+// query.
+func upstreamHandler(u api.Upstream, log *slog.Logger, logCtx context.Context) (http.Handler, error) {
 	target, err := url.Parse(u.URL)
 	if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" {
 		return nil, fmt.Errorf("upstream %q URL is invalid", u.Name)
@@ -489,16 +529,30 @@ func upstreamHandler(u api.Upstream) (http.Handler, error) {
 				pr.Out.Header.Set("Authorization", "Bearer "+token)
 			}
 		},
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+		ModifyResponse: func(resp *http.Response) error {
+			log.DebugContext(logCtx, "upstream request", "upstream", u.Name, "method", resp.Request.Method, "status", resp.StatusCode)
+			return nil
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			// A *url.Error holds the request URL, which can hold a secret
+			// query. Log only its cause.
+			var ue *url.Error
+			if errors.As(err, &ue) {
+				err = ue.Err
+			}
+			log.WarnContext(logCtx, "upstream request failed", "code", "upstream_failed", "upstream", u.Name,
+				"method", logHost(r.Method), "error", trace.BoundedError(err))
 			http.Error(w, "upstream request failed", http.StatusBadGateway)
 		},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !u.AllowWrite && r.Method != http.MethodGet && r.Method != http.MethodHead {
+			log.InfoContext(logCtx, "upstream request denied", "code", "upstream_write_denied", "upstream", u.Name, "method", logHost(r.Method))
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		if strings.Contains(r.URL.Path, "..") {
+			log.InfoContext(logCtx, "upstream request denied", "code", "upstream_path_invalid", "upstream", u.Name)
 			http.Error(w, "invalid path", http.StatusBadRequest)
 			return
 		}

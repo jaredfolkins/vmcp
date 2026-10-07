@@ -21,6 +21,7 @@ import (
 
 	"github.com/jaredfolkins/vmcp/internal/machine"
 	"github.com/jaredfolkins/vmcp/internal/server"
+	"github.com/jaredfolkins/vmcp/internal/trace"
 )
 
 const (
@@ -29,20 +30,21 @@ const (
 )
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	if err := run(os.Args[1:], log); err != nil {
-		log.Error("vmcp failed", "error", err)
+	level := new(slog.LevelVar)
+	log := slog.New(trace.NewHandler(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+	if err := run(os.Args[1:], log, level); err != nil {
+		log.Error("vmcp failed", "code", "vmcp_failed", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(args []string, log *slog.Logger) error {
+func run(args []string, log *slog.Logger, level *slog.LevelVar) error {
 	if len(args) == 0 {
 		return errors.New("usage: vmcp serve|healthcheck [flags]")
 	}
 	switch args[0] {
 	case "serve":
-		return serve(args[1:], log)
+		return serve(args[1:], log, level)
 	case "healthcheck":
 		return healthcheck(args[1:])
 	default:
@@ -50,9 +52,10 @@ func run(args []string, log *slog.Logger) error {
 	}
 }
 
-func serve(args []string, log *slog.Logger) error {
+func serve(args []string, log *slog.Logger, level *slog.LevelVar) error {
 	var rf runtimeFlags
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	logLevel := fs.String("log-level", "info", "minimum log level: debug, info, warn, or error")
 	listen := fs.String("listen", ":8080", "listen address on the private service network")
 	credentialFile := fs.String("credential-file", "/run/secrets/vmcp-credential", "owner-private file with the caller bearer credential")
 	maxMachines := fs.Int("max-machines", 16, "machines that may hold a slot at once")
@@ -60,6 +63,11 @@ func serve(args []string, log *slog.Logger) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := level.UnmarshalText([]byte(*logLevel)); err != nil {
+		return fmt.Errorf("log-level %q: use debug, info, warn, or error", *logLevel)
+	}
+	log.Info("vmcp starting", append([]any{"log_level", level.Level().String(), "listen", *listen,
+		"max_machines", *maxMachines}, rf.attrs()...)...)
 	if err := requireNoNewPrivs(); err != nil {
 		return err
 	}

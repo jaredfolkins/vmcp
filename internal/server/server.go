@@ -16,6 +16,7 @@ import (
 
 	"github.com/jaredfolkins/vmcp/api"
 	"github.com/jaredfolkins/vmcp/internal/machine"
+	"github.com/jaredfolkins/vmcp/internal/trace"
 )
 
 const maxJSONBody = 96 << 20
@@ -26,15 +27,15 @@ type Service interface {
 	CreateImage(ctx context.Context, req api.ImageRequest) (api.Image, error)
 	Image(id string) (api.Image, error)
 	Images() []api.Image
-	DeleteImage(id string) error
+	DeleteImage(ctx context.Context, id string) error
 	CreateMachine(ctx context.Context, spec api.MachineSpec) (api.Machine, error)
 	Machine(id string) (api.Machine, error)
 	Machines(labels map[string]string) []api.Machine
 	StartMachine(ctx context.Context, id string) (api.Machine, error)
-	StopMachine(id string) (api.Machine, error)
+	StopMachine(ctx context.Context, id string) (api.Machine, error)
 	DeleteMachine(ctx context.Context, id string) (api.Machine, error)
-	PutDrive(id, name string, r io.Reader) error
-	GetDrive(id, name string) (*os.File, error)
+	PutDrive(ctx context.Context, id, name string, r io.Reader) error
+	GetDrive(ctx context.Context, id, name string) (*os.File, error)
 	Events(ctx context.Context, id string, after uint64, follow bool, fn func(api.Event) error) error
 	SelfTest(ctx context.Context) (api.SelfTestResult, error)
 }
@@ -54,19 +55,25 @@ type server struct {
 }
 
 // New returns the API handler. Only RouteHealth and RouteReady work
-// without the credential. A route that is not implemented answers not_found after
-// authentication.
+// without the credential. A route that is not implemented answers not_found
+// after authentication. Every request runs in a trace span and writes one
+// request log line.
 func New(cfg Config) http.Handler {
 	s := &server{credentialSum: sha256.Sum256(cfg.Credential), svc: cfg.Service, log: cfg.Logger}
+	if s.log == nil {
+		s.log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	mux := http.NewServeMux()
-	mux.HandleFunc(api.RouteHealth, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	mux.HandleFunc(api.RouteReady, func(w http.ResponseWriter, _ *http.Request) {
+	mux.Handle(api.RouteHealth, s.observe(api.RouteHealth, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})))
+	mux.Handle(api.RouteReady, s.observe(api.RouteReady, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if s.svc.Status().Ready {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		w.WriteHeader(http.StatusServiceUnavailable)
-	})
+	})))
 	routes := map[string]http.HandlerFunc{
 		api.RouteStatus:      func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.svc.Status()) },
 		api.RouteCreateImage: s.createImage,
@@ -84,7 +91,7 @@ func New(cfg Config) http.Handler {
 			s.reply(w, http.StatusOK)(s.svc.StartMachine(r.Context(), r.PathValue("id")))
 		},
 		api.RouteStopMachine: func(w http.ResponseWriter, r *http.Request) {
-			s.reply(w, http.StatusOK)(s.svc.StopMachine(r.PathValue("id")))
+			s.reply(w, http.StatusOK)(s.svc.StopMachine(r.Context(), r.PathValue("id")))
 		},
 		api.RouteDeleteMachine: func(w http.ResponseWriter, r *http.Request) {
 			s.reply(w, http.StatusOK)(s.svc.DeleteMachine(r.Context(), r.PathValue("id")))
@@ -95,20 +102,125 @@ func New(cfg Config) http.Handler {
 		api.RouteSelfTest:      func(w http.ResponseWriter, r *http.Request) { s.reply(w, http.StatusOK)(s.svc.SelfTest(r.Context())) },
 	}
 	for pattern, h := range routes {
-		mux.Handle(pattern, s.authenticate(h))
+		mux.Handle(pattern, s.observe(pattern, s.authenticate(h)))
 	}
-	mux.Handle("/", s.authenticate(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	mux.Handle("/", s.observe("", s.authenticate(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, api.ErrNotFound, "route not found")
-	})))
+	}))))
 	return mux
 }
+
+// observe runs a request in a span that continues the caller's
+// traceparent, returns the span in the traceparent response header, and
+// writes one request line when the handler returns. The line is the
+// primary diagnostic of a failed request: ERROR for a 5xx status, WARN for
+// 401, 429, and 503, INFO otherwise, and DEBUG for health and readiness
+// probes that succeed.
+func (s *server) observe(pattern string, next http.Handler) http.Handler {
+	route := pattern
+	if route == "" {
+		route = "unknown"
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, span := trace.StartRemote(r.Context(), s.log, "api "+route, r.Header.Get(trace.Header))
+		w.Header().Set(trace.Header, span.Traceparent())
+		rec := &recorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r.WithContext(ctx))
+		attrs := []any{"method", r.Method, "route", route, "status", rec.status, "bytes", rec.bytes,
+			"duration_ms", trace.Millis(span.Elapsed())}
+		if route == "unknown" {
+			attrs = append(attrs, "path", boundedPath(r.URL.Path))
+		}
+		attrs = append(attrs, pathAttrs(pattern, r)...)
+		if rec.code != "" {
+			attrs = append(attrs, "code", rec.code)
+		}
+		if rec.err != nil {
+			attrs = append(attrs, "error", trace.BoundedError(rec.err))
+		}
+		s.log.Log(ctx, requestLevel(pattern, rec.status), "api request", attrs...)
+	})
+}
+
+func requestLevel(pattern string, status int) slog.Level {
+	switch {
+	case status >= 500 && status != http.StatusServiceUnavailable:
+		return slog.LevelError
+	case status == http.StatusUnauthorized || status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable:
+		if pattern == api.RouteReady {
+			return slog.LevelDebug
+		}
+		return slog.LevelWarn
+	case pattern == api.RouteHealth || pattern == api.RouteReady:
+		return slog.LevelDebug
+	}
+	return slog.LevelInfo
+}
+
+// pathAttrs names the path values of a route by the resource they select.
+func pathAttrs(pattern string, r *http.Request) []any {
+	var attrs []any
+	if id := r.PathValue("id"); id != "" {
+		switch {
+		case strings.Contains(pattern, "/v1/machines/"):
+			attrs = append(attrs, "machine", id)
+		case strings.Contains(pattern, "/v1/images/"):
+			attrs = append(attrs, "image", id)
+		case strings.Contains(pattern, "/v1/snapshots/"):
+			attrs = append(attrs, "snapshot", id)
+		}
+	}
+	if name := r.PathValue("name"); name != "" {
+		attrs = append(attrs, "drive", name)
+	}
+	return attrs
+}
+
+func boundedPath(p string) string {
+	if len(p) > 128 {
+		return p[:128]
+	}
+	return p
+}
+
+// recorder keeps the status, size, and error of a response for the request
+// line. It passes Flush through for event streams.
+type recorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+	code   api.ErrorCode
+	err    error
+	wrote  bool
+}
+
+func (r *recorder) WriteHeader(status int) {
+	if !r.wrote {
+		r.status, r.wrote = status, true
+	}
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *recorder) Write(b []byte) (int, error) {
+	r.wrote = true
+	n, err := r.ResponseWriter.Write(b)
+	r.bytes += int64(n)
+	return n, err
+}
+
+func (r *recorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (r *recorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 func (s *server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		sum := sha256.Sum256([]byte(token))
 		if !ok || subtle.ConstantTimeCompare(sum[:], s.credentialSum[:]) != 1 {
-			s.log.Warn("api request rejected", "code", api.ErrUnauthorized, "method", r.Method, "path", r.URL.Path)
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			writeError(w, http.StatusUnauthorized, api.ErrUnauthorized, "a valid bearer credential is required")
 			return
@@ -137,7 +249,7 @@ func (s *server) createImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) deleteImage(w http.ResponseWriter, r *http.Request) {
-	if err := s.svc.DeleteImage(r.PathValue("id")); err != nil {
+	if err := s.svc.DeleteImage(r.Context(), r.PathValue("id")); err != nil {
 		s.writeErr(w, err)
 		return
 	}
@@ -166,7 +278,7 @@ func (s *server) listMachines(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) putDrive(w http.ResponseWriter, r *http.Request) {
-	if err := s.svc.PutDrive(r.PathValue("id"), r.PathValue("name"), r.Body); err != nil {
+	if err := s.svc.PutDrive(r.Context(), r.PathValue("id"), r.PathValue("name"), r.Body); err != nil {
 		s.writeErr(w, err)
 		return
 	}
@@ -174,7 +286,7 @@ func (s *server) putDrive(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getDrive(w http.ResponseWriter, r *http.Request) {
-	f, err := s.svc.GetDrive(r.PathValue("id"), r.PathValue("name"))
+	f, err := s.svc.GetDrive(r.Context(), r.PathValue("id"), r.PathValue("name"))
 	if err != nil {
 		s.writeErr(w, err)
 		return
@@ -227,10 +339,14 @@ func (s *server) decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
+// writeErr writes the API error of err. The request line logs the code
+// and the cause; the response carries only the safe message.
 func (s *server) writeErr(w http.ResponseWriter, err error) {
+	if rec, ok := w.(*recorder); ok {
+		rec.err = err
+	}
 	var me *machine.Error
 	if !errors.As(err, &me) {
-		s.log.Error("api request failed", "code", api.ErrInternal)
 		writeError(w, http.StatusInternalServerError, api.ErrInternal, "internal error")
 		return
 	}
@@ -248,6 +364,9 @@ func (s *server) writeErr(w http.ResponseWriter, err error) {
 }
 
 func writeError(w http.ResponseWriter, status int, code api.ErrorCode, message string) {
+	if rec, ok := w.(*recorder); ok {
+		rec.code = code
+	}
 	writeJSON(w, status, api.ErrorResponse{Error: api.Error{Code: code, Message: message}})
 }
 

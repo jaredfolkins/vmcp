@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/jaredfolkins/vmcp/api"
 	"github.com/jaredfolkins/vmcp/internal/machine"
+	"github.com/jaredfolkins/vmcp/internal/trace"
 	"github.com/jaredfolkins/vmcp/runtimes/firecracker/internal/agentproto"
 	"github.com/jaredfolkins/vmcp/runtimes/firecracker/internal/image"
 )
@@ -53,6 +55,12 @@ type Machine struct {
 	imgMeta  image.Meta
 	lns      []net.Listener
 	listenWG sync.WaitGroup
+	// log is the machine logger. traceCtx carries the trace of the request
+	// that provisioned or booted the machine. Lines about the machine log
+	// with it.
+	log       *slog.Logger
+	traceCtx  context.Context
+	bootStart time.Time
 
 	mu         sync.Mutex
 	booted     bool
@@ -72,12 +80,17 @@ func (r *Runtime) Provision(ctx context.Context, ls machine.Launch) (inst machin
 		return nil, fmt.Errorf("machine ID %q is too short", ls.ID)
 	}
 	m := &Machine{
-		r:      r,
-		spec:   ls,
-		jailID: "vmcp-" + id[:10],
-		uid:    r.cfg.UIDBase + ls.Slot,
-		tag:    fmt.Sprintf("vmcp:%s:%s", r.cfg.InstallID, ls.ID),
-		done:   make(chan struct{}),
+		r:        r,
+		spec:     ls,
+		jailID:   "vmcp-" + id[:10],
+		uid:      r.cfg.UIDBase + ls.Slot,
+		tag:      fmt.Sprintf("vmcp:%s:%s", r.cfg.InstallID, ls.ID),
+		done:     make(chan struct{}),
+		log:      ls.Logger,
+		traceCtx: trace.Detach(ctx),
+	}
+	if m.log == nil {
+		m.log = r.cfg.Logger.With("machine", ls.ID)
 	}
 	m.jailRoot = filepath.Join(r.cfg.JailBase, "firecracker", m.jailID, "root")
 	m.cgroup = filepath.Join(r.cgroupParent(), m.jailID)
@@ -96,27 +109,36 @@ func (r *Runtime) Provision(ctx context.Context, ls machine.Launch) (inst machin
 			m.teardown(context.Background())
 		}
 	}()
-	if err := os.MkdirAll(m.jailRoot, 0o700); err != nil {
-		return nil, fmt.Errorf("create jail: %w", err)
+	steps := []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{"provision.jail", func(context.Context) error {
+			if err := os.MkdirAll(m.jailRoot, 0o700); err != nil {
+				return fmt.Errorf("create jail: %w", err)
+			}
+			r.enf.watch(m.jailRoot)
+			return writeMarker(filepath.Dir(m.jailRoot), r.cfg.InstallID)
+		}},
+		{"provision.drives", m.stageFiles},
+		{"provision.network", func(ctx context.Context) error {
+			if !needsNetwork(ls.Spec.Network) {
+				return nil
+			}
+			return m.startNetwork(ctx)
+		}},
+		{"provision.config", func(context.Context) error { return m.writeConfigs() }},
+		{"provision.vsock", func(context.Context) error { return m.listen() }},
 	}
-	r.enf.watch(m.jailRoot)
-	if err := writeMarker(filepath.Dir(m.jailRoot), r.cfg.InstallID); err != nil {
-		return nil, err
-	}
-	if err := m.stageFiles(ctx); err != nil {
-		return nil, err
-	}
-	if needsNetwork(ls.Spec.Network) {
-		if err := m.startNetwork(ctx); err != nil {
+	for _, step := range steps {
+		sctx, span := trace.Start(ctx, m.log, step.name)
+		err := step.run(sctx)
+		span.End(err)
+		if err != nil {
 			return nil, err
 		}
 	}
-	if err := m.writeConfigs(); err != nil {
-		return nil, err
-	}
-	if err := m.listen(); err != nil {
-		return nil, err
-	}
+	m.log.DebugContext(ctx, "machine provisioned", "jail", m.jailID, "uid", m.uid, "cgroup", m.cgroup, "network", m.net != nil)
 	return m, nil
 }
 
@@ -179,7 +201,8 @@ func (m *Machine) startNetwork(ctx context.Context) error {
 	b, err := startBrokers(m.spec.Spec.Network, g.Host, brokerConfig{
 		DNSUpstreams: m.r.cfg.DNSUpstreams,
 		Deny:         append(append([]netip.Prefix(nil), DefaultDenyPrefixes...), m.r.cfg.Deny...),
-		Log:          m.r.cfg.Logger,
+		Log:          m.log,
+		TraceCtx:     m.traceCtx,
 	})
 	if err != nil {
 		return err
@@ -320,6 +343,8 @@ func (m *Machine) Boot(ctx context.Context) error {
 		return errors.New("machine was already started")
 	}
 	m.booted = true
+	m.traceCtx = trace.Detach(ctx)
+	m.bootStart = time.Now()
 	m.mu.Unlock()
 	res := m.spec.Spec.Resources
 	mem := int64(max(res.MemoryMiB, 128)+memoryOverhead) << 20
@@ -358,6 +383,7 @@ func (m *Machine) Boot(ctx context.Context) error {
 		return fmt.Errorf("start jailer: %w", err)
 	}
 	m.event(api.Event{Kind: api.EventStep, Step: "boot", Status: "running"})
+	m.log.DebugContext(ctx, "jailer started", "pid", cmd.Process.Pid, "jail", m.jailID, "uid", m.uid)
 	go func() {
 		_ = cmd.Wait()
 		_ = serial.Close()
@@ -369,10 +395,15 @@ func (m *Machine) Boot(ctx context.Context) error {
 // Kill stops the guest at once. It is safe to call more than once.
 func (m *Machine) Kill(reason string) {
 	m.mu.Lock()
-	if m.killReason == "" {
+	first := m.killReason == ""
+	if first {
 		m.killReason = reason
 	}
+	logCtx := m.traceCtx
 	m.mu.Unlock()
+	if first {
+		m.log.DebugContext(logCtx, "machine kill", "reason", reason)
+	}
 	_ = killCgroup(m.cgroup)
 }
 
@@ -459,38 +490,43 @@ func (m *Machine) policyHash() string {
 // teardown removes every resource of the machine and checks each removal.
 // It returns "destroyed" when nothing remains.
 func (m *Machine) teardown(ctx context.Context) string {
+	m.mu.Lock()
+	logCtx := m.traceCtx
+	m.mu.Unlock()
+	_, span := trace.Start(logCtx, m.log, "teardown")
 	ok := true
-	if err := killCgroup(m.cgroup); err != nil {
-		ok = false
+	step := func(name string, err error) {
+		if err != nil {
+			ok = false
+			m.log.WarnContext(logCtx, "teardown step failed", "code", "teardown_step_failed", "step", name,
+				"error", trace.BoundedError(err))
+		}
 	}
-	if err := removeCgroup(m.cgroup); err != nil {
-		ok = false
-	}
+	step("kill-cgroup", killCgroup(m.cgroup))
+	step("remove-cgroup", removeCgroup(m.cgroup))
 	for _, ln := range m.lns {
 		_ = ln.Close()
 	}
 	m.listenWG.Wait()
 	m.brokers.close()
 	if m.net != nil {
-		if err := removeTap(ctx, *m.net, m.tag); err != nil {
-			ok = false
-		}
+		step("remove-tap", removeTap(ctx, *m.net, m.tag))
 	}
 	jail := filepath.Dir(m.jailRoot)
-	if err := os.RemoveAll(jail); err != nil {
-		ok = false
-	}
+	step("remove-jail", os.RemoveAll(jail))
 	if _, err := os.Lstat(jail); err == nil {
-		ok = false
+		step("verify-jail", fmt.Errorf("jail %s remains", m.jailID))
 	}
 	if _, err := os.Lstat(m.cgroup); err == nil {
-		ok = false
+		step("verify-cgroup", fmt.Errorf("cgroup %s remains", filepath.Base(m.cgroup)))
 	}
 	m.r.enf.remove(m)
+	status := "partial"
 	if ok {
-		return "destroyed"
+		status = "destroyed"
 	}
-	return "partial"
+	span.End(nil, "status", status)
+	return status
 }
 
 // postureChecked reports whether the boot posture check passed. The
@@ -539,6 +575,10 @@ func (m *Machine) readEvents(c net.Conn) {
 		}
 		switch msg.Type {
 		case agentproto.TypeHello:
+			m.mu.Lock()
+			logCtx, bootStart := m.traceCtx, m.bootStart
+			m.mu.Unlock()
+			m.log.InfoContext(logCtx, "guest agent connected", "boot_ms", trace.Millis(time.Since(bootStart)))
 			m.event(api.Event{Kind: api.EventStep, Step: "guest-agent", Status: "running"})
 			m.checkPosture()
 		case agentproto.TypeStep:
@@ -573,7 +613,10 @@ func (m *Machine) acceptDrives(ln net.Listener) {
 			return
 		}
 		if err := m.receiveDrive(c); err != nil {
-			m.r.cfg.Logger.Warn("drive receive failed", "machine", m.spec.ID, "code", "drive_receive_failed")
+			m.mu.Lock()
+			logCtx := m.traceCtx
+			m.mu.Unlock()
+			m.log.WarnContext(logCtx, "drive receive failed", "code", "drive_receive_failed", "error", trace.BoundedError(err))
 		}
 	}
 }
@@ -596,7 +639,8 @@ func (m *Machine) receiveDrive(c net.Conn) error {
 		}
 	}
 	if limit < 0 {
-		return fmt.Errorf("drive %q is not a writable spec drive", hdr.Name)
+		// The name is guest text. Keep it out of the error, which is logged.
+		return errors.New("the drive header names no writable spec drive")
 	}
 	outDir := filepath.Join(m.spec.Dir, "out")
 	if err := os.MkdirAll(outDir, 0o700); err != nil {

@@ -119,7 +119,10 @@ func (e *enforcer) sweep(ctx context.Context) {
 }
 
 func (e *enforcer) violation(m *Machine, what string) {
-	e.r.cfg.Logger.Error("enforcer violation", "machine", m.spec.ID, "code", "enforcer_violation", "violation", what)
+	m.mu.Lock()
+	logCtx := m.traceCtx
+	m.mu.Unlock()
+	m.log.ErrorContext(logCtx, "enforcer violation", "code", "enforcer_violation", "violation", what)
 	m.event(api.Event{Kind: api.EventStep, Step: "enforcer", Status: "failed", Data: []byte(what)})
 	m.Kill("enforcer")
 }

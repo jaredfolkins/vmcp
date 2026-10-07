@@ -5,6 +5,7 @@ package machine
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/jaredfolkins/vmcp/api"
 )
@@ -67,6 +68,9 @@ type Launch struct {
 	WorkDir string
 	User    string
 	Sink    Sink
+	// Logger is the machine logger. Its lines carry the machine identity
+	// and the trace of the request that started the machine.
+	Logger *slog.Logger
 }
 
 // Sink receives machine events in order. The sink sets Seq and Time.

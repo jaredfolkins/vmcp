@@ -25,10 +25,26 @@ type Error struct {
 	Status  int
 	Code    api.ErrorCode
 	Message string
+	// TraceID is the vmcp trace of the failed request. The vmcp log has
+	// every line of that request under this trace_id.
+	TraceID string
 }
 
 func (e *Error) Error() string {
+	if e.TraceID != "" {
+		return fmt.Sprintf("vmcp %d %s: %s (trace %s)", e.Status, e.Code, e.Message, e.TraceID)
+	}
 	return fmt.Sprintf("vmcp %d %s: %s", e.Status, e.Code, e.Message)
+}
+
+type traceparentKey struct{}
+
+// WithTraceparent returns a context whose requests send the W3C traceparent
+// value. vmcp continues that trace, so the caller finds the vmcp log lines
+// of each request, and of the machine work that it starts, by trace ID. An
+// invalid value makes vmcp start a new trace.
+func WithTraceparent(ctx context.Context, traceparent string) context.Context {
+	return context.WithValue(ctx, traceparentKey{}, traceparent)
 }
 
 // IsCode reports whether err is a vmcp error with the code.
@@ -254,6 +270,9 @@ func (c *Client) request(ctx context.Context, route string, params map[string]st
 		return nil, fmt.Errorf("build vmcp request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.credential)
+	if tp, _ := ctx.Value(traceparentKey{}).(string); tp != "" {
+		req.Header.Set(api.HeaderTraceparent, tp)
+	}
 	return req, nil
 }
 
@@ -272,7 +291,17 @@ func (c *Client) send(req *http.Request) (*http.Response, error) {
 	if json.Unmarshal(raw, &er) != nil || er.Error.Code == "" {
 		er.Error = api.Error{Code: api.ErrInternal, Message: http.StatusText(resp.StatusCode)}
 	}
-	return nil, &Error{Status: resp.StatusCode, Code: er.Error.Code, Message: er.Error.Message}
+	return nil, &Error{Status: resp.StatusCode, Code: er.Error.Code, Message: er.Error.Message,
+		TraceID: traceIDOf(resp.Header.Get(api.HeaderTraceparent))}
+}
+
+// traceIDOf returns the trace ID field of a traceparent value, or "".
+func traceIDOf(tp string) string {
+	parts := strings.Split(tp, "-")
+	if len(parts) != 4 || len(parts[1]) != 32 {
+		return ""
+	}
+	return parts[1]
 }
 
 func drain(resp *http.Response) error {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jaredfolkins/vmcp/api"
+	"github.com/jaredfolkins/vmcp/internal/trace"
 )
 
 // killCgroup kills every process in the cgroup and waits until it is
@@ -170,12 +171,23 @@ func (m *Machine) checkPosture() {
 	m.mu.Lock()
 	m.posture = p
 	m.mu.Unlock()
+	m.mu.Lock()
+	logCtx := m.traceCtx
+	m.mu.Unlock()
 	if err != nil || len(violations) > 0 {
-		m.r.cfg.Logger.Error("machine posture violation", "machine", m.spec.ID, "code", "posture_violation", "violations", len(violations))
+		attrs := []any{"code", "posture_violation", "threads", threads, "violations", len(violations)}
+		if len(violations) > 0 {
+			attrs = append(attrs, "first_violation", violations[0])
+		}
+		if err != nil {
+			attrs = append(attrs, "error", trace.BoundedError(err))
+		}
+		m.log.ErrorContext(logCtx, "machine posture violation", attrs...)
 		m.event(api.Event{Kind: api.EventStep, Step: "posture", Status: "failed"})
 		m.Kill("posture-violation")
 		return
 	}
+	m.log.DebugContext(logCtx, "posture verified", "threads", threads)
 	m.event(api.Event{Kind: api.EventStep, Step: "posture", Status: "completed"})
 }
 

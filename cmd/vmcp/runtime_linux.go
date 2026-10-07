@@ -33,6 +33,12 @@ func (f *runtimeFlags) register(fs *flag.FlagSet) {
 	fs.IntVar(&f.uidBase, "uid-base", 400000, "first machine UID and GID")
 }
 
+// attrs returns the runtime configuration for the startup log line.
+func (f *runtimeFlags) attrs() []any {
+	return []any{"state_root", f.stateRoot, "jail_base", f.jailBase, "cgroup_parent", f.cgroupParent,
+		"install_id", f.installID, "pool", f.pool, "dns_upstreams", f.dns, "extra_deny", f.deny, "uid_base", f.uidBase}
+}
+
 func newRuntime(ctx context.Context, f runtimeFlags, log *slog.Logger) (machine.Runtime, string, error) {
 	pool, err := netip.ParsePrefix(f.pool)
 	if err != nil {

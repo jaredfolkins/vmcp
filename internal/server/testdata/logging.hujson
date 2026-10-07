@@ -1,0 +1,24 @@
+{
+  // The caller trace that the client sends on every request of the flow.
+  "caller_traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+  "image_ref": "example/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "machine_name": "traced-job",
+  "program": "echo:traced",
+  // One request line per call of the flow, in order, with its level.
+  "requests": [
+    {"route": "POST /v1/images", "level": "INFO", "status": 201},
+    {"route": "POST /v1/machines", "level": "INFO", "status": 201},
+    {"route": "POST /v1/machines/{id}/start", "level": "INFO", "status": 200},
+    {"route": "GET /v1/machines/{id}/events", "level": "INFO", "status": 200},
+    {"route": "DELETE /v1/machines/{id}", "level": "INFO", "status": 200},
+    {"route": "GET /v1/machines/{id}", "level": "INFO", "status": 404, "code": "not_found"},
+  ],
+  // Machine lifecycle lines that must carry the caller trace and the
+  // machine identity.
+  "machine_lines": ["machine created", "machine started", "machine ended", "machine deleted"],
+  // Requests outside the caller trace and the level of their line.
+  "probes": [
+    {"path": "/health", "credential": false, "status": 204, "level": "DEBUG"},
+    {"path": "/v1/status", "credential": false, "status": 401, "level": "WARN", "code": "unauthorized"},
+  ],
+}

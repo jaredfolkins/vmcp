@@ -1,0 +1,16 @@
+{
+  // W3C traceparent values and whether vmcp continues them.
+  "parse": [
+    {"name": "valid", "value": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "ok": true,
+     "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "parent_id": "00f067aa0ba902b7"},
+    {"name": "not sampled", "value": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00", "ok": true,
+     "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "parent_id": "00f067aa0ba902b7"},
+    {"name": "uppercase hex", "value": "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01", "ok": false},
+    {"name": "zero trace", "value": "00-00000000000000000000000000000000-00f067aa0ba902b7-01", "ok": false},
+    {"name": "zero parent", "value": "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01", "ok": false},
+    {"name": "other version", "value": "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "ok": false},
+    {"name": "short", "value": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902-01", "ok": false},
+    {"name": "empty", "value": "", "ok": false},
+  ],
+  "caller_traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+}

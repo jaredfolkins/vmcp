@@ -5,6 +5,11 @@ import "time"
 // Version is the API version in every route path.
 const Version = "v1"
 
+// HeaderTraceparent is the W3C trace context header. A caller may send it
+// on any route; vmcp continues that trace and returns its own span in the
+// same response header.
+const HeaderTraceparent = "traceparent"
+
 // Route patterns in the net/http ServeMux form: a method, a space, and a
 // path. Path parameters use the {name} form.
 const (
