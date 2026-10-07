@@ -31,6 +31,12 @@ that every item follows.
    the Runner code and protocol. Accept: browser, LEMCSSH, and `lemcli`
    parity for one recipe with events, storage, cancel, timeout, and restart
    recovery; demo readiness passes.
+   Progress: Web dispatch to vmcp runs a hosted recipe end to end on a
+   development stack, with events, storage publication, a canonical
+   cleanup proof, and finalize. Open: Provider activations and Builder
+   runs, the cancel, timeout, and restart-recovery proofs, browser,
+   LEMCSSH, and `lemcli` parity, the switch from `runner` to `vmcp` in
+   Compose, and removal of the Runner code.
 3. **V4 Install and upgrade.** `vmcp install` and the OS folder entry
    points. LEMC `lemc-install` and Angel delegate to it. Accept: on each
    supported OS, the live gate proves a fresh install, a same-version
