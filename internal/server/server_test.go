@@ -191,7 +191,7 @@ func TestAuthentication(t *testing.T) {
 		path, token string
 		want        int
 	}{
-		{"/healthz", "", http.StatusNoContent},
+		{"/health", "", http.StatusNoContent},
 		{"/ready", "", http.StatusNoContent},
 		{"/v1/status", "", http.StatusUnauthorized},
 		{"/v1/status", testCredential + "x", http.StatusUnauthorized},

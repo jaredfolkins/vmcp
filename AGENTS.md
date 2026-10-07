@@ -119,7 +119,7 @@ unconfined; a vmcp AppArmor profile is not written yet.
 ## The API
 - HTTP/1.1 with JSON bodies. Drive content is a tar body. Events are
   newline-delimited JSON. Exec and console attach use WebSocket.
-- Every route except `GET /healthz` and `GET /ready` needs
+- Every route except `GET /health` and `GET /ready` needs
   `Authorization: Bearer <credential>`. `GET /ready` answers 204 when the
   runtime is ready and 503 when it is not, with no body. The credential is one owner-private file. One caller (LEMC
   Web) holds it. vmcp compares credential hashes in constant time.

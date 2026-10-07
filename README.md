@@ -24,10 +24,10 @@ One vmcp binary serves one runtime: the runtime of the OS it is built for.
 
 ## Design
 
-- **One caller, one credential.** Every route except `GET /healthz` and
-  `GET /ready` needs a bearer credential from an owner-private file. Run vmcp on a private
-  network that only its caller can reach. Do not publish its port on a host
-  interface.
+- **One caller, one credential.** Every route except `GET /health` and
+  `GET /ready` needs a bearer credential from an owner-private file. Run vmcp
+  on a private network that only its caller can reach. Do not publish its
+  port on a host interface.
 - **Baked release.** The Firecracker and jailer binaries are embedded in the
   vmcp binary with a lock of their sizes and SHA-256 sums. vmcp uses a binary
   only after it matches the lock. Nothing is downloaded at install or run
@@ -60,7 +60,7 @@ docker run -d --name vmcp \
   -p 127.0.0.1:18080:8080 \
   vmcp:dev
 
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/healthz
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/health
 curl -s -H "Authorization: Bearer $(cat vmcp-credential)" \
   http://127.0.0.1:18080/v1/status
 ```
@@ -93,7 +93,7 @@ The routes and types are in [`api/api.go`](api/api.go).
 
 | Area | Routes |
 | --- | --- |
-| Service | `GET /healthz`, `GET /ready`, `GET /v1/status`, `POST /v1/selftest` |
+| Service | `GET /health`, `GET /ready`, `GET /v1/status`, `POST /v1/selftest` |
 | Images | `POST`, `GET /v1/images`, `GET`, `DELETE /v1/images/{id}` |
 | Machines | `POST`, `GET /v1/machines`, `GET`, `DELETE /v1/machines/{id}`, `POST .../start`, `.../stop`, `.../restart` |
 | Drives and events | `PUT`, `GET /v1/machines/{id}/drives/{name}`, `GET /v1/machines/{id}/events` |

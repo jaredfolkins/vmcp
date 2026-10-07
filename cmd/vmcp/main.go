@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	defaultHealthURL = "http://127.0.0.1:8080/healthz"
+	defaultHealthURL = "http://127.0.0.1:8080/health"
 	shutdownTimeout  = 10 * time.Second
 )
 
