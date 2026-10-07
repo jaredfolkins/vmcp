@@ -26,7 +26,7 @@ LABEL org.opencontainers.image.title="vmcp" \
       org.opencontainers.image.licenses="NOASSERTION"
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      iproute2 nftables e2fsprogs ca-certificates \
+      iproute2 nftables e2fsprogs ca-certificates tini \
  && rm -rf /var/lib/apt/lists/*
 ADD --checksum=sha256:aa31ad182c31a0bb45fa72362973b1e584378ae55faef06b94b7c4b6a0862afc --chmod=0444 \
     https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20260723-ae5bf5b68fc4-0/x86_64/vmlinux-5.10.260 \
@@ -37,5 +37,8 @@ EXPOSE 8080
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=6 \
     CMD ["/usr/local/bin/vmcp", "healthcheck"]
-ENTRYPOINT ["/usr/local/bin/vmcp"]
+# With --new-pid-ns the jailer exits after it starts Firecracker, so
+# Firecracker is reparented to PID 1. tini is PID 1: it reaps those
+# processes and forwards signals to vmcp.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/vmcp"]
 CMD ["serve", "--listen", ":8080", "--credential-file", "/run/secrets/vmcp-credential"]

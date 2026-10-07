@@ -66,6 +66,10 @@
 NET_BIND_SERVICE, SETUID, SETGID, SYS_ADMIN, SYS_CHROOT, SYS_RESOURCE.
 Docker's default seccomp profile blocks the jailer `pivot_root`. AppArmor ran
 unconfined; a vmcp AppArmor profile is not written yet.
+vmcp must not be PID 1. With `--new-pid-ns` the jailer exits after it starts
+Firecracker, so Firecracker is reparented to PID 1, and vmcp does not reap
+processes that it did not start. The image runs `tini` as PID 1. Without it,
+each machine leaves a zombie Firecracker process.
 
 ## Scope And Budget
 - Do the selected backlog item and its acceptance checks. Then stop.
