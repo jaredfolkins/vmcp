@@ -40,8 +40,11 @@
     direct, and host-port access denied, DNS, and complete teardown.
   - `TestEphemeralMachine` (e2e) through the running service and the Go
     client: drives, events, redaction, egress, proof.
-- Not done for V2: the enforcer goroutine, `POST /v1/selftest`, and running
-  vmcp as UID 65532. vmcp runs as root inside its container today.
+- The enforcer runs in vmcp. The live gate proves that it removes a stray
+  `vmcp-` tap, restores a flushed `vmcp` table, and kills a machine whose
+  jail gains a setuid file or whose cgroup gains a foreign process.
+- Not done for V2: `POST /v1/selftest` and running vmcp as UID 65532. vmcp
+  runs as root inside its container today.
 - `runtimes/firecracker/release/` bakes in Firecracker `1.16.0` and jailer
   `1.16.0`, linux/amd64, verified against the upstream archive.
 - `runtimes/firecracker/installers/` has Debian 12 and Ubuntu 24.04 amd64 host

@@ -84,9 +84,13 @@ func (r *Runtime) Provision(ctx context.Context, ls machine.Launch) (inst machin
 	if m.imgMeta, err = image.ReadMeta(r.ImageDir(ls.ImageID)); err != nil {
 		return nil, fmt.Errorf("read image: %w", err)
 	}
+	if !r.enf.healthy() {
+		return nil, errors.New("the enforcer is not running")
+	}
 	if _, err := os.Lstat(filepath.Dir(m.jailRoot)); err == nil {
 		return nil, fmt.Errorf("jail %s already exists", m.jailID)
 	}
+	r.enf.add(m)
 	defer func() {
 		if err != nil {
 			m.teardown(context.Background())
@@ -95,6 +99,7 @@ func (r *Runtime) Provision(ctx context.Context, ls machine.Launch) (inst machin
 	if err := os.MkdirAll(m.jailRoot, 0o700); err != nil {
 		return nil, fmt.Errorf("create jail: %w", err)
 	}
+	r.enf.watch(m.jailRoot)
 	if err := writeMarker(filepath.Dir(m.jailRoot), r.cfg.InstallID); err != nil {
 		return nil, err
 	}
@@ -165,7 +170,9 @@ func (m *Machine) startNetwork(ctx context.Context) error {
 		}
 	}
 	g.Allowed, _ = plannedPorts(m.spec.Spec.Network, g.Host)
+	m.mu.Lock()
 	m.net = &g
+	m.mu.Unlock()
 	if err := addTap(ctx, g, m.uid, m.tag); err != nil {
 		return fmt.Errorf("add tap: %w", err)
 	}
@@ -479,10 +486,27 @@ func (m *Machine) teardown(ctx context.Context) string {
 	if _, err := os.Lstat(m.cgroup); err == nil {
 		ok = false
 	}
+	m.r.enf.remove(m)
 	if ok {
 		return "destroyed"
 	}
 	return "partial"
+}
+
+// postureChecked reports whether the boot posture check passed. The
+// enforcer audits a machine only after that baseline.
+func (m *Machine) postureChecked() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ok, _ := m.posture["ok"].(bool)
+	return ok
+}
+
+// netInfo returns the machine network, or nil.
+func (m *Machine) netInfo() *guestNet {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.net
 }
 
 func (m *Machine) event(ev api.Event) {

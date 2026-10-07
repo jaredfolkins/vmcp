@@ -12,7 +12,9 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -70,6 +72,16 @@ func (r *recorder) Event(ev api.Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.events = append(r.events, ev)
+}
+
+func (r *recorder) dump() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var b strings.Builder
+	for _, ev := range r.events {
+		fmt.Fprintf(&b, "[%s %s %s %q] ", ev.Kind, ev.Step, ev.Status, ev.Data)
+	}
+	return b.String()
 }
 
 func (r *recorder) output(kind api.EventKind) string {
@@ -132,6 +144,53 @@ func TestLiveFirecracker(t *testing.T) {
 		checkProof(t, rt, res)
 	})
 
+	t.Run("enforcer", func(t *testing.T) {
+		if err := run(ctx, nil, "ip", "tuntap", "add", "dev", "vmcp-stray0", "mode", "tap"); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, 5*time.Second, "stray tap removal", func() bool {
+			return run(ctx, nil, "ip", "link", "show", "dev", "vmcp-stray0") != nil
+		})
+		if err := run(ctx, nil, "nft", "flush", "chain", "inet", nftTable, "input"); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, 5*time.Second, "vmcp table restore", func() bool {
+			out, err := exec.Command("nft", "-j", "list", "table", "inet", nftTable).Output()
+			return err == nil && chainRuleCount(out) == expectedChainRules
+		})
+
+		m, _ := startLive(t, ctx, rt, "m-aaaa000000000001", 2, "sleep 60")
+		evil := filepath.Join(m.jailRoot, "evil")
+		if err := os.WriteFile(evil, []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(evil, 0o4755); err != nil {
+			t.Fatal(err)
+		}
+		if res := waitKilled(t, m, 10*time.Second); res.Proof.DestroyReason != "enforcer" || !res.Proof.Destroyed {
+			t.Errorf("setuid file: proof = %+v, want an enforcer kill and destroyed", res.Proof)
+		}
+
+		m2, _ := startLive(t, ctx, rt, "m-aaaa000000000002", 3, "sleep 60")
+		intruder := exec.Command("sleep", "100")
+		if err := intruder.Start(); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- intruder.Wait() }()
+		if err := os.WriteFile(filepath.Join(m2.cgroup, "cgroup.procs"), []byte(strconv.Itoa(intruder.Process.Pid)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if res := waitKilled(t, m2, 10*time.Second); res.Proof.DestroyReason != "enforcer" || !res.Proof.Destroyed {
+			t.Errorf("extra process: proof = %+v, want an enforcer kill and destroyed", res.Proof)
+		}
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("the intruding process survived the machine kill")
+		}
+	})
+
 	t.Run("network", func(t *testing.T) {
 		script := strings.Join([]string{
 			fmt.Sprintf("wget -q -T 10 -O /dev/null %s && echo EGRESS_OK", c.EgressURL),
@@ -153,6 +212,60 @@ func TestLiveFirecracker(t *testing.T) {
 		}
 		checkProof(t, rt, res)
 	})
+}
+
+// startLive provisions and boots a machine and waits for its posture
+// check. It returns the running machine.
+func startLive(t *testing.T, ctx context.Context, rt *Runtime, id string, slot int, script string) (*Machine, *recorder) {
+	t.Helper()
+	dir := filepath.Join(rt.machinesDir(), id)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	rec := &recorder{}
+	inst, err := rt.Provision(ctx, machine.Launch{
+		ID: id, Slot: slot, Dir: dir, ImageID: "img-live",
+		Spec: api.MachineSpec{Resources: api.Resources{VCPUs: 1, MemoryMiB: 128, DiskMiB: 128}},
+		Args: []string{"/bin/sh", "-c", script}, Env: []string{"PATH=/bin:/usr/bin"}, WorkDir: "/", Sink: rec,
+	})
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	m := inst.(*Machine)
+	t.Cleanup(func() { m.Destroy(context.Background(), "test-cleanup") })
+	if err := m.Boot(ctx); err != nil {
+		t.Fatalf("Boot() error = %v", err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for !m.postureChecked() {
+		if time.Now().After(deadline) {
+			t.Fatalf("no posture check in 30s; events: %s", rec.dump())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return m, rec
+}
+
+func waitFor(t *testing.T, d time.Duration, what string, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for !ok() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for %s", d, what)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func waitKilled(t *testing.T, m *Machine, d time.Duration) machine.Result {
+	t.Helper()
+	select {
+	case <-m.Done():
+	case <-time.After(d):
+		t.Fatalf("machine %s was not stopped within %s", m.spec.ID, d)
+	}
+	return m.Result()
 }
 
 func runLive(t *testing.T, ctx context.Context, rt *Runtime, id string, slot int, spec api.MachineSpec, user string) (*recorder, machine.Result, string) {
@@ -188,6 +301,7 @@ func runLive(t *testing.T, ctx context.Context, rt *Runtime, id string, slot int
 	t.Logf("machine %s ran in %s; exit %+v; proof %s", id, time.Since(start).Round(time.Millisecond), res.Exit, res.Proof.TeardownStatus)
 	if res.Exit == nil {
 		t.Logf("serial log tail: %s", tail(filepath.Join(dir, "serial.log")))
+		t.Logf("events: %s", rec.dump())
 	}
 	return rec, res, dir
 }

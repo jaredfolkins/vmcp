@@ -713,8 +713,11 @@ func finalExit(killReason string, res Result) *api.Exit {
 	case "stopped", "deleted":
 		return &api.Exit{Code: -1, Reason: api.ExitStopped}
 	}
-	if res.Proof.DestroyReason == "posture-violation" {
+	switch res.Proof.DestroyReason {
+	case "posture-violation":
 		return &api.Exit{Code: -1, Reason: api.ExitFailed, Detail: "posture violation"}
+	case "enforcer":
+		return &api.Exit{Code: -1, Reason: api.ExitFailed, Detail: "security violation"}
 	}
 	if res.Exit != nil {
 		return res.Exit

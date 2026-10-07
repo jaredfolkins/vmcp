@@ -62,10 +62,12 @@ type Runtime struct {
 	firecracker string
 	jailer      string
 	release     string
+	enf         *enforcer
 }
 
 // New prepares the host: it installs the baked binaries, creates and tags
-// the parent cgroup, and replaces the vmcp nftables table.
+// the parent cgroup, and replaces the vmcp nftables table. It starts the
+// enforcer, which runs until ctx ends.
 func New(ctx context.Context, cfg Config) (*Runtime, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -105,6 +107,9 @@ func New(ctx context.Context, cfg Config) (*Runtime, error) {
 	if err := setupTable(ctx); err != nil {
 		return nil, fmt.Errorf("set up nftables table: %w", err)
 	}
+	r.enf = newEnforcer(r)
+	r.enf.sweep(ctx)
+	go r.enf.run(ctx)
 	return r, nil
 }
 
@@ -170,9 +175,15 @@ func writeMarker(dir, installID string) error {
 	return os.WriteFile(p, []byte(installID+"\n"), 0o600)
 }
 
-// Status reports the release, host checks, and capacity.
+// Status reports the release, host checks, enforcer health, and capacity.
 func (r *Runtime) Status() api.Status {
 	st := r.host.Status()
+	if r.enf.healthy() {
+		st.Checks = append(st.Checks, api.Check{Name: "enforcer", OK: true})
+	} else {
+		st.Checks = append(st.Checks, api.Check{Name: "enforcer", Detail: "enforcer sweeps stopped"})
+		st.Ready = false
+	}
 	for _, p := range []struct{ name, path string }{{"kernel", r.cfg.KernelPath}, {"agent", r.cfg.AgentPath}} {
 		if fi, err := os.Stat(p.path); err != nil || !fi.Mode().IsRegular() {
 			st.Checks = append(st.Checks, api.Check{Name: p.name, Detail: "file is missing"})
