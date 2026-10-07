@@ -203,4 +203,3 @@ func TestLogTracesAMachineFlow(t *testing.T) {
 		t.Errorf("machine ended line = %v", ended)
 	}
 }
-

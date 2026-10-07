@@ -182,6 +182,9 @@ each machine leaves a zombie Firecracker process.
   place. Do not clone a snapshot into a second machine.
 
 ### Recovery
+- When vmcp stops, it stops every running ephemeral machine. Each gets state
+  `failed`, the detail `vmcp stopped`, a proof, and an exit event that ends
+  its event streams.
 - When vmcp starts, it destroys every ephemeral guest that an earlier
   process left. Each one gets state `failed`, exit reason `failed`, and a
   proof.

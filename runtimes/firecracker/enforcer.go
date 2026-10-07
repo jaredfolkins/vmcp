@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/jaredfolkins/vmcp/api"
+	"github.com/jaredfolkins/vmcp/internal/trace"
 )
 
 const (
@@ -127,12 +128,31 @@ func (e *enforcer) violation(m *Machine, what string) {
 	m.Kill("enforcer")
 }
 
-func (e *enforcer) stray(kind, name string, err error) {
-	if err != nil {
-		e.r.cfg.Logger.Error("enforcer could not remove stray asset", "code", "enforcer_cleanup_failed", "kind", kind, "name", name)
+// stray removes an asset that no live machine owns. A sweep lists assets
+// before it reads the live machines, so a machine teardown can remove the
+// asset first. stray acts only while the asset exists, and it reports only
+// a real removal or a real failure.
+func (e *enforcer) stray(kind, name string, exists func() bool, remove func() error) {
+	if !exists() {
 		return
 	}
-	e.r.cfg.Logger.Warn("enforcer removed stray asset", "code", "enforcer_stray_removed", "kind", kind, "name", name)
+	err := remove()
+	switch {
+	case err == nil:
+		e.r.cfg.Logger.Warn("enforcer removed stray asset", "code", "enforcer_stray_removed", "kind", kind, "name", name)
+	case !exists():
+		e.r.cfg.Logger.Debug("stray asset removed by its owner first", "kind", kind, "name", name)
+	default:
+		e.r.cfg.Logger.Error("enforcer could not remove stray asset", "code", "enforcer_cleanup_failed", "kind", kind,
+			"name", name, "error", trace.BoundedError(err))
+	}
+}
+
+func pathExists(p string) func() bool {
+	return func() bool {
+		_, err := os.Lstat(p)
+		return err == nil
+	}
 }
 
 // sweepCgroups kills unknown machine cgroups and checks the posture of
@@ -146,7 +166,7 @@ func (e *enforcer) sweepCgroups() {
 		p := filepath.Join(e.r.cgroupParent(), d.Name())
 		m := e.known(d.Name())
 		if m == nil {
-			e.stray("cgroup", d.Name(), errorsJoin(killCgroup(p), removeCgroup(p)))
+			e.stray("cgroup", d.Name(), pathExists(p), func() error { return errorsJoin(killCgroup(p), removeCgroup(p)) })
 			continue
 		}
 		if !m.postureChecked() {
@@ -173,7 +193,8 @@ func (e *enforcer) sweepJails() {
 	for _, d := range entries {
 		m := e.known(d.Name())
 		if m == nil {
-			e.stray("jail", d.Name(), os.RemoveAll(filepath.Join(base, d.Name())))
+			jail := filepath.Join(base, d.Name())
+			e.stray("jail", d.Name(), pathExists(jail), func() error { return os.RemoveAll(jail) })
 			continue
 		}
 		if what := jailViolation(m.jailRoot, len(m.spec.Spec.Drives)); what != "" {
@@ -259,7 +280,9 @@ func (e *enforcer) sweepTaps(ctx context.Context) {
 		}
 		m := owned[l.Name]
 		if m == nil {
-			e.stray("tap", l.Name, run(ctx, nil, "ip", "link", "del", "dev", l.Name))
+			name := l.Name
+			e.stray("tap", name, func() bool { return run(ctx, nil, "ip", "link", "show", "dev", name) == nil },
+				func() error { return run(ctx, nil, "ip", "link", "del", "dev", name) })
 			continue
 		}
 		if l.Master != "" {
@@ -290,8 +313,16 @@ func (e *enforcer) sweepTable(ctx context.Context) {
 	cmd := exec.CommandContext(ctx, "nft", "-j", "list", "table", "inet", nftTable)
 	cmd.Env = []string{toolPath, "LC_ALL=C"}
 	out, err := cmd.Output()
+	if ctx.Err() != nil {
+		// vmcp is stopping. A failed listing is not a changed table.
+		return
+	}
 	if err != nil || chainRuleCount(out) != expectedChainRules {
-		e.r.cfg.Logger.Error("enforcer restored the vmcp table", "code", "enforcer_table_restored")
+		attrs := []any{"code", "enforcer_table_restored", "chain_rules", chainRuleCount(out)}
+		if err != nil {
+			attrs = append(attrs, "error", trace.BoundedError(err))
+		}
+		e.r.cfg.Logger.Error("enforcer restored the vmcp table", attrs...)
 		e.restoreTable(ctx)
 		return
 	}
@@ -307,9 +338,28 @@ func (e *enforcer) sweepTable(ctx context.Context) {
 	e.mu.Unlock()
 	for _, el := range setElements(out) {
 		if !want[el.key()] {
-			e.stray("nft element", el.Tap, run(ctx, nil, "nft", "delete", "element", "inet", nftTable, "guest_allow", el.expr()))
+			e.stray("nft element", el.Tap, func() bool { return elementExists(ctx, el) },
+				func() error {
+					return run(ctx, nil, "nft", "delete", "element", "inet", nftTable, "guest_allow", el.expr())
+				})
 		}
 	}
+}
+
+// elementExists reports whether the guest_allow set holds el now.
+func elementExists(ctx context.Context, el element) bool {
+	cmd := exec.CommandContext(ctx, "nft", "-j", "list", "table", "inet", nftTable)
+	cmd.Env = []string{toolPath, "LC_ALL=C"}
+	out, err := cmd.Output()
+	if err != nil {
+		return true
+	}
+	for _, cur := range setElements(out) {
+		if cur.key() == el.key() {
+			return true
+		}
+	}
+	return false
 }
 
 // expectedChainRules is the rule count of the input and forward chains.

@@ -1,0 +1,8 @@
+{
+  // A running machine when vmcp stops, and what its record must show.
+  "program": "hang",
+  "machine_name": "running-at-shutdown",
+  "want_state": "failed",
+  "want_exit_reason": "failed",
+  "want_exit_detail": "vmcp stopped",
+}

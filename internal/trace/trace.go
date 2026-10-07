@@ -177,7 +177,9 @@ type handler struct{ next slog.Handler }
 // whose context carries a span, then passes the record to next.
 func NewHandler(next slog.Handler) slog.Handler { return handler{next: next} }
 
-func (h handler) Enabled(ctx context.Context, level slog.Level) bool { return h.next.Enabled(ctx, level) }
+func (h handler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.next.Enabled(ctx, level)
+}
 
 func (h handler) Handle(ctx context.Context, r slog.Record) error {
 	if s := FromContext(ctx); s != nil {

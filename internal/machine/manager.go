@@ -730,6 +730,52 @@ func (m *Manager) DeleteMachine(ctx context.Context, id string) (api.Machine, er
 	return final, nil
 }
 
+// stopReasonShutdown is the kill reason of a machine that vmcp stops
+// because vmcp itself stops.
+const stopReasonShutdown = "vmcp-stopping"
+
+// Shutdown stops every running machine because vmcp is stopping, and waits
+// until each one ended or ctx ends. An ephemeral machine cannot outlive the
+// vmcp process, so each gets state failed with the detail "vmcp stopped",
+// a teardown proof, and an exit event that ends its event streams.
+func (m *Manager) Shutdown(ctx context.Context) error {
+	m.mu.Lock()
+	var running []*entry
+	for _, en := range m.machines {
+		if en.rec.Machine.State == api.StateRunning {
+			running = append(running, en)
+		}
+	}
+	m.mu.Unlock()
+	if len(running) == 0 {
+		return nil
+	}
+	ctx, span := trace.Start(ctx, m.log, "shutdown")
+	for _, en := range running {
+		m.kill(en, stopReasonShutdown)
+	}
+	var err error
+	for _, en := range running {
+		select {
+		case <-en.finished:
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
+		if err != nil {
+			break
+		}
+	}
+	span.End(err)
+	if err != nil {
+		m.log.ErrorContext(ctx, "machines did not stop before vmcp stopped", "code", "shutdown_incomplete",
+			"machines", len(running), "error", trace.BoundedError(err))
+		return err
+	}
+	m.log.InfoContext(ctx, "machines stopped for vmcp shutdown", "machines", len(running),
+		"duration_ms", trace.Millis(span.Elapsed()))
+	return nil
+}
+
 // Events streams the events of a machine.
 func (m *Manager) Events(ctx context.Context, id string, after uint64, follow bool, fn func(api.Event) error) error {
 	m.mu.Lock()
@@ -814,6 +860,8 @@ func finalExit(killReason string, res Result) *api.Exit {
 		return &api.Exit{Code: -1, Reason: api.ExitOutputLimit}
 	case "stopped", "deleted":
 		return &api.Exit{Code: -1, Reason: api.ExitStopped}
+	case stopReasonShutdown:
+		return &api.Exit{Code: -1, Reason: api.ExitFailed, Detail: "vmcp stopped"}
 	}
 	switch res.Proof.DestroyReason {
 	case "posture-violation":

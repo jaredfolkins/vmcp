@@ -99,9 +99,18 @@ func serve(args []string, log *slog.Logger, level *slog.LevelVar) error {
 		return fmt.Errorf("serve: %w", err)
 	case <-ctx.Done():
 	}
+	log.Info("vmcp stopping")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+	// Stop new requests, then stop the machines so that open event streams
+	// get their exit events and end. Stop machines again for any start that
+	// was in flight.
+	srvDone := make(chan error, 1)
+	go func() { srvDone <- srv.Shutdown(shutdownCtx) }()
+	machineErr := mgr.Shutdown(shutdownCtx)
+	srvErr := <-srvDone
+	machineErr = errors.Join(machineErr, mgr.Shutdown(shutdownCtx))
+	if err := errors.Join(srvErr, machineErr); err != nil {
 		return fmt.Errorf("shutdown: %w", err)
 	}
 	log.Info("vmcp stopped")
