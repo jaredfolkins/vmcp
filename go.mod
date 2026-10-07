@@ -1,3 +1,3 @@
-module github.com/jaredfolkins/vm-controlplane
+module github.com/jaredfolkins/vmcp
 
 go 1.26.2

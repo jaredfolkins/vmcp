@@ -1,5 +1,5 @@
 {
-  "schema": "vm-controlplane/firecracker-release/v1",
+  "schema": "vmcp/firecracker-release/v1",
   "version": "1.16.0",
   "platform": "linux/amd64",
   "source": {

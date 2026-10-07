@@ -1,9 +1,9 @@
 # VM Control Plane Agent Guide
 
 ## Purpose
-- `vm-controlplane` is a small control plane for one VM technology per
-  backend. It installs, configures, upgrades, and removes that technology on
-  a host. It runs and manages machines: create, start, stream, wait,
+- `vmcp` (module `github.com/jaredfolkins/vmcp`) is a small VM control
+  plane for one VM technology per backend. It installs, configures,
+  upgrades, and removes that technology on a host. It runs and manages machines: create, start, stream, wait,
   destroy, recover, self-test, and status.
 - `firecracker/` is the only backend. More backends can follow. Each one
   satisfies the same contract (see [Backends](#backends)).
@@ -43,8 +43,9 @@
   was checked in a container. The package, device, and Docker checks are
   `NOT VERIFIED` on a real Debian 12 host.
 - All VM code is still in `../letemcook-private`.
-- No Git remote is configured. Creating a remote repository needs explicit
-  user authority.
+- The remote is `git@github.com:jaredfolkins/vmcp.git`. The repository is
+  public. Do not push private LEMC data, credentials, host names, or
+  operator paths.
 
 ## Scope And Budget
 - Do the selected phase task and its acceptance checks. Then stop.

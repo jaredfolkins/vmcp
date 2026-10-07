@@ -17,7 +17,7 @@ import (
 const (
 	releaseDir      = "release"
 	releaseLockName = "release-v1.json"
-	releaseSchema   = "vm-controlplane/firecracker-release/v1"
+	releaseSchema   = "vmcp/firecracker-release/v1"
 )
 
 // requiredArtifacts are the binaries that every baked release must contain.
