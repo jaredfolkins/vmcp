@@ -11,7 +11,7 @@ const (
 	RouteHealth = "GET /healthz"
 	// RouteReady answers 204 when the runtime is ready and 503 when it is
 	// not. Like RouteHealth, it needs no credential and has no body.
-	RouteReady    = "GET /readyz"
+	RouteReady    = "GET /ready"
 	RouteStatus   = "GET /v1/status"
 	RouteSelfTest = "POST /v1/selftest"
 

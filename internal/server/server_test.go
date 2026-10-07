@@ -192,7 +192,7 @@ func TestAuthentication(t *testing.T) {
 		want        int
 	}{
 		{"/healthz", "", http.StatusNoContent},
-		{"/readyz", "", http.StatusNoContent},
+		{"/ready", "", http.StatusNoContent},
 		{"/v1/status", "", http.StatusUnauthorized},
 		{"/v1/status", testCredential + "x", http.StatusUnauthorized},
 		{"/v1/machines", "", http.StatusUnauthorized},
