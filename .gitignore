@@ -8,3 +8,6 @@
 .gomodcache/
 .gopath/
 /.e2e/
+/vmcp
+/vmcp-agent
+*.test
