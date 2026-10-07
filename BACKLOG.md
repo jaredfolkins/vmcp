@@ -6,9 +6,7 @@ that every item follows.
 ## How to use this file
 - Work on one item at a time, in the order of [Next](#next). Only the user
   selects an item from [Later](#later).
-- An item that changes `../letemcook-private` must first be the one active
-  phase in its `docs/PLAN.md`. Only the user selects it.
-- Each item leaves both repositories green.
+- Each item leaves the repository green.
 - When an item is accepted, move it to [Done](#done) with its commit.
 - Settle a decision in [Decisions](#decisions) before the item that needs
   it starts. Record the answer in AGENTS.md and remove it here.
@@ -24,35 +22,19 @@ that every item follows.
   Open hardening: run vmcp as UID 65532 and add a vmcp AppArmor profile.
 
 ## Next
-1. **V1 Remove the embedded Runner (LEMC).** Delete it and the unused
-   `runnerpool` code. Accept: LEMC still runs one jailed recipe end to end.
-2. **V3 Web dispatch (LEMC).** Web runs recipes, Provider activations, and
-   Builder runs through vmcp. The `vmcp` service replaces `runner`. Delete
-   the Runner code and protocol. Accept: browser, LEMCSSH, and `lemcli`
-   parity for one recipe with events, storage, cancel, timeout, and restart
-   recovery; demo readiness passes.
-   Progress: Web dispatch to vmcp runs a hosted recipe end to end on a
-   development stack, with events, storage publication, a canonical
-   cleanup proof, and finalize. Open: Provider activations and Builder
-   runs, the cancel, timeout, and restart-recovery proofs, browser,
-   LEMCSSH, and `lemcli` parity, the switch from `runner` to `vmcp` in
-   Compose, and removal of the Runner code.
-3. **V4 Install and upgrade.** `vmcp install` and the OS folder entry
-   points. LEMC `lemc-install` and Angel delegate to it. Accept: on each
+1. **V4 Install and upgrade.** `vmcp install` and the OS folder entry
+   points. A caller's installer can call it. Accept: on each
    supported OS, the live gate proves a fresh install, a same-version
    reinstall, an upgrade, an injected failure that rolls back, a teardown
    that leaves only the preserved state, and a purge that leaves nothing.
-4. **V5 Persistent machines.** Root disk, drives, stop, start, restart,
+2. **V5 Persistent machines.** Root disk, drives, stop, start, restart,
    restart policy, and preservation across upgrade. Accept: live gate.
-5. **V6 Exec, console, and ports.** Accept: live gate with allowed and
-   denied access, and Web relay tests.
-6. **V7 Snapshots.** Create, list, restore, and delete. Accept: live gate,
+3. **V6 Exec, console, and ports.** Accept: live gate with allowed and
+   denied access, and a relay test through the Go client.
+4. **V7 Snapshots.** Create, list, restore, and delete. Accept: live gate,
    including a refused restore across releases.
-7. **V8 Release lane.** Build, record, and publish the vmcp image with
-   pinned tools. LEMC consumes it by digest.
-
-LEMC product features for persistent machines, such as pages and LEMCSSH
-commands, are separate LEMC phases.
+5. **V8 Release lane.** Build, record, and publish the vmcp image with
+   pinned tools. Callers consume it by digest. Declare the API stable.
 
 ## Later
 - **macOS runtime with Apple `container`.** A second runtime in
@@ -61,9 +43,8 @@ commands, are separate LEMC phases.
   2026-10-07: the latest release is `1.5.0`; it needs Apple silicon and
   macOS 26; its data is forward compatible only within one major version.
   Settle first:
-  - how vmcp runs on macOS. It cannot use the Linux image, and LEMC allows
-    only Compose services today, so a host process on macOS needs a LEMC
-    rule change. Driving the CLI keeps vmcp free of cgo and of the
+  - how vmcp runs on macOS. It cannot use the Linux image, so it runs as a
+    host process. Driving the CLI keeps vmcp free of cgo and of the
     virtualization entitlement, which `container` holds;
   - how to pin and install one exact `container` release, as Firecracker is
     pinned today;
@@ -88,14 +69,11 @@ commands, are separate LEMC phases.
   selects one.
 
 ## Decisions
-- Storage path. Default: Web downloads drive tars and publishes them to
-  object storage. The other option is a vmcp upload to a storage upstream,
-  which avoids one copy. Needed by V3.
-- WebSocket library for exec and console. Default: `gorilla/websocket`,
-  which LEMC already uses. Needed by V6.
+- Output path. Default: the caller downloads drive tars. The other option is
+  a vmcp upload to a storage upstream, which avoids one copy.
+- WebSocket library for exec and console. Default: `gorilla/websocket`.
+  Needed by V6.
 - Capacity policy. Today a slot limit (`--max-machines`) bounds machines
   and status reports host totals. Decide reservations and overcommit.
 - Network identity of a persistent machine across restarts and restores.
   Needed by V5.
-- How LEMC release builds get this module's source: vendor it, or extend
-  the release source receipt to two commits. Needed by V3.
