@@ -24,8 +24,8 @@ One vmcp binary serves one runtime: the runtime of the OS it is built for.
 
 ## Design
 
-- **One caller, one credential.** Every route except `GET /healthz` needs a
-  bearer credential from an owner-private file. Run vmcp on a private
+- **One caller, one credential.** Every route except `GET /healthz` and
+  `GET /ready` needs a bearer credential from an owner-private file. Run vmcp on a private
   network that only its caller can reach. Do not publish its port on a host
   interface.
 - **Baked release.** The Firecracker and jailer binaries are embedded in the
@@ -93,7 +93,7 @@ The routes and types are in [`api/api.go`](api/api.go).
 
 | Area | Routes |
 | --- | --- |
-| Service | `GET /healthz`, `GET /v1/status`, `POST /v1/selftest` |
+| Service | `GET /healthz`, `GET /ready`, `GET /v1/status`, `POST /v1/selftest` |
 | Images | `POST`, `GET /v1/images`, `GET`, `DELETE /v1/images/{id}` |
 | Machines | `POST`, `GET /v1/machines`, `GET`, `DELETE /v1/machines/{id}`, `POST .../start`, `.../stop`, `.../restart` |
 | Drives and events | `PUT`, `GET /v1/machines/{id}/drives/{name}`, `GET /v1/machines/{id}/events` |
