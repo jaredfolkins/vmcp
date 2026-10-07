@@ -71,6 +71,8 @@ type Manager struct {
 	imageMu  map[string]*sync.Mutex
 	slots    map[int]string
 	secrets  secretStore
+
+	selfTestMu sync.Mutex
 }
 
 type entry struct {
@@ -816,4 +818,54 @@ func writeJSON(p string, v any) error {
 		return err
 	}
 	return os.Rename(tmp, p)
+}
+
+// selfTestImage is the ID of the built-in self-test image.
+const selfTestImage = "img-selftest"
+
+// SelfTest runs one ephemeral machine from the built-in self-test image
+// with DNS and public egress enabled. The guest proves its denials; the
+// runtime proves posture and teardown.
+func (m *Manager) SelfTest(ctx context.Context) (api.SelfTestResult, error) {
+	m.selfTestMu.Lock()
+	defer m.selfTestMu.Unlock()
+	info, err := m.rt.PrepareSelfTestImage(ctx, selfTestImage)
+	if err != nil {
+		return api.SelfTestResult{Detail: "self-test image could not be prepared: " + safeDetail(err)}, nil
+	}
+	img := api.Image{ID: selfTestImage, Ref: "vmcp-selftest", ImageDigest: info.ImageDigest, Compatibility: info.Compatibility,
+		SizeBytes: info.SizeBytes, CreatedAt: time.Now().UTC()}
+	if err := writeJSON(filepath.Join(m.imageRecordsDir(), selfTestImage+".json"), imageRecord{Image: img, Process: info.Process}); err != nil {
+		return api.SelfTestResult{}, err
+	}
+	m.mu.Lock()
+	m.images[selfTestImage] = &img
+	m.mu.Unlock()
+	mach, err := m.CreateMachine(ctx, api.MachineSpec{
+		Name: "vmcp-selftest-" + newID()[2:], Lifecycle: api.Ephemeral, Image: selfTestImage, TimeoutSeconds: 60,
+		Resources: api.Resources{VCPUs: 1, MemoryMiB: 128, DiskMiB: 64},
+		Network:   api.Network{DNS: true, PublicEgress: true},
+		Labels:    map[string]string{"vmcp.selftest": "true"},
+		Start:     true,
+	})
+	if err != nil {
+		return api.SelfTestResult{Detail: "self-test machine could not start: " + safeDetail(err)}, nil
+	}
+	var out bytes.Buffer
+	_ = m.Events(ctx, mach.ID, 0, true, func(ev api.Event) error {
+		if ev.Kind == api.EventStdout && out.Len() < 4096 {
+			out.Write(ev.Data)
+		}
+		return nil
+	})
+	final, err := m.DeleteMachine(ctx, mach.ID)
+	if err != nil {
+		return api.SelfTestResult{}, err
+	}
+	res := api.SelfTestResult{Detail: strings.TrimSpace(out.String())}
+	if final.Proof != nil {
+		res.Proof = *final.Proof
+	}
+	res.Passed = final.Exit != nil && final.Exit.Code == 0 && final.Exit.Reason == api.ExitCompleted && res.Proof.Destroyed
+	return res, nil
 }

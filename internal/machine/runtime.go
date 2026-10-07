@@ -13,6 +13,9 @@ import (
 type Runtime interface {
 	Status() api.Status
 	PrepareImage(ctx context.Context, id string, req api.ImageRequest) (ImageInfo, error)
+	// PrepareSelfTestImage builds the built-in image that runs the runtime
+	// self-test in a guest.
+	PrepareSelfTestImage(ctx context.Context, id string) (ImageInfo, error)
 	DeleteImage(id string) error
 	// Provision builds an isolated machine without booting it.
 	Provision(ctx context.Context, l Launch) (Instance, error)

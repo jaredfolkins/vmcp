@@ -36,6 +36,7 @@ type Service interface {
 	PutDrive(id, name string, r io.Reader) error
 	GetDrive(id, name string) (*os.File, error)
 	Events(ctx context.Context, id string, after uint64, follow bool, fn func(api.Event) error) error
+	SelfTest(ctx context.Context) (api.SelfTestResult, error)
 }
 
 // Config holds the server dependencies.
@@ -84,6 +85,7 @@ func New(cfg Config) http.Handler {
 		api.RoutePutDrive:      s.putDrive,
 		api.RouteGetDrive:      s.getDrive,
 		api.RouteMachineEvents: s.events,
+		api.RouteSelfTest:      func(w http.ResponseWriter, r *http.Request) { s.reply(w, http.StatusOK)(s.svc.SelfTest(r.Context())) },
 	}
 	for pattern, h := range routes {
 		mux.Handle(pattern, s.authenticate(h))

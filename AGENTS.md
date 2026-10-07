@@ -23,11 +23,14 @@
 ## Current State
 - `api/` is the draft HTTP contract. Routes and fields can change until LEMC
   uses them in production.
-- `vmcp serve` implements health, status, images (create, list, get,
-  delete), ephemeral machines (create, list, get, start, stop, delete),
+- `vmcp serve` implements health, status, self-test, images (create, list,
+  get, delete), ephemeral machines (create, list, get, start, stop, delete),
   drive upload and download, and event streams. Persistent machines, exec,
-  console, ports, snapshots, and self-test are not implemented; their routes
-  answer `not_found` and a persistent spec is refused.
+  console, ports, and snapshots are not implemented; their routes answer
+  `not_found` and a persistent spec is refused.
+- The self-test boots a machine from a built-in agent-only image. The guest
+  proves that the vmcp port, metadata, private and direct destinations are
+  unreachable and that the egress broker refuses metadata.
 - `client/` is the Go client. `internal/machine` is the runtime-neutral
   manager. `runtimes/firecracker` is the Firecracker runtime with its guest
   agent, image preparation, network, Go brokers, and posture checks.
@@ -43,8 +46,8 @@
 - The enforcer runs in vmcp. The live gate proves that it removes a stray
   `vmcp-` tap, restores a flushed `vmcp` table, and kills a machine whose
   jail gains a setuid file or whose cgroup gains a foreign process.
-- Not done for V2: `POST /v1/selftest` and running vmcp as UID 65532. vmcp
-  runs as root inside its container today.
+- Not done for V2: running vmcp as UID 65532 and a vmcp AppArmor profile.
+  vmcp runs as root inside its container today.
 - `runtimes/firecracker/release/` bakes in Firecracker `1.16.0` and jailer
   `1.16.0`, linux/amd64, verified against the upstream archive.
 - `runtimes/firecracker/installers/` has Debian 12 and Ubuntu 24.04 amd64 host

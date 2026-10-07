@@ -168,3 +168,23 @@ func TestEphemeralMachine(t *testing.T) {
 		t.Errorf("posture = %+v, want ok", posture)
 	}
 }
+
+// TestSelfTest runs the built-in self-test through the running service. The
+// guest proves its network denials; the proof shows posture and teardown.
+func TestSelfTest(t *testing.T) {
+	_, cl := load(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	start := time.Now()
+	res, err := cl.SelfTest(ctx)
+	if err != nil {
+		t.Fatalf("SelfTest() error = %v", err)
+	}
+	t.Logf("self-test in %s: %s", time.Since(start).Round(time.Millisecond), res.Detail)
+	if !res.Passed || !res.Proof.Destroyed {
+		t.Fatalf("SelfTest() = %+v, want passed and destroyed", res)
+	}
+	if posture, _ := res.Proof.Detail["posture"].(map[string]any); posture["ok"] != true {
+		t.Errorf("posture = %+v, want ok", posture)
+	}
+}

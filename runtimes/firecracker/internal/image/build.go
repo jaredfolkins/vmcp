@@ -132,6 +132,56 @@ func Prepare(ctx context.Context, hc *http.Client, dir string, req Request) (met
 	return meta, nil
 }
 
+// PrepareSelfTest builds the self-test image: an empty root with only the
+// guest agent, which runs its own self-test mode.
+func PrepareSelfTest(ctx context.Context, dir, agentPath string) (meta Meta, err error) {
+	agentSum, err := fileSHA256(agentPath)
+	if err != nil {
+		return Meta{}, fmt.Errorf("hash guest agent: %w", err)
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return Meta{}, fmt.Errorf("create image directory: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = os.RemoveAll(dir)
+		}
+	}()
+	root := filepath.Join(dir, "root")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		return Meta{}, err
+	}
+	if err := inject(root, agentPath); err != nil {
+		return Meta{}, err
+	}
+	img := filepath.Join(dir, RootFSName)
+	size, err := buildExt4(ctx, root, img)
+	if err != nil {
+		return Meta{}, err
+	}
+	if err := os.Chmod(img, 0o444); err != nil {
+		return Meta{}, err
+	}
+	if err := os.RemoveAll(root); err != nil {
+		return Meta{}, err
+	}
+	meta = Meta{
+		Ref:           "vmcp-selftest",
+		ImageDigest:   "sha256:" + agentSum,
+		Compatibility: Compatibility(agentSum),
+		SizeBytes:     size,
+		Process:       Config{Cmd: []string{"/" + agentPath0, "selftest"}},
+	}
+	b, err := json.Marshal(meta)
+	if err != nil {
+		return Meta{}, err
+	}
+	return meta, os.WriteFile(filepath.Join(dir, metaName), b, 0o600)
+}
+
+// agentPath0 is the agent path inside a prepared root.
+const agentPath0 = agentPath
+
 // ReadMeta reads the metadata of a prepared image.
 func ReadMeta(dir string) (Meta, error) {
 	b, err := os.ReadFile(filepath.Join(dir, metaName))

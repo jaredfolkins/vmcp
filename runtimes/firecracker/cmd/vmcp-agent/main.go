@@ -37,6 +37,9 @@ const (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "selftest" && os.Getpid() != 1 {
+		os.Exit(selfTest())
+	}
 	console := openConsole()
 	ev, err := dialHost(agentproto.EventPort)
 	if err != nil {

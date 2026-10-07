@@ -39,6 +39,10 @@ func (f *fakeRuntime) PrepareImage(_ context.Context, _ string, req api.ImageReq
 
 func (f *fakeRuntime) DeleteImage(string) error { return nil }
 
+func (f *fakeRuntime) PrepareSelfTestImage(context.Context, string) (machine.ImageInfo, error) {
+	return machine.ImageInfo{ImageDigest: "sha256:selftest", Process: machine.ProcessConfig{Cmd: []string{"echo:{\"metadata_denied\":true}"}}}, nil
+}
+
 func (f *fakeRuntime) Recover(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -387,5 +391,23 @@ func TestLoadCredentialRejectsUnsafeFiles(t *testing.T) {
 		if _, err := LoadCredential(path); err == nil {
 			t.Errorf("LoadCredential(%s) error = nil, want an error", name)
 		}
+	}
+}
+
+// TestSelfTest proves that the self-test runs one machine from the
+// built-in image, reports the guest result and the proof, and leaves no
+// machine behind.
+func TestSelfTest(t *testing.T) {
+	h := newHarness(t, t.TempDir())
+	ctx := context.Background()
+	res, err := h.c.SelfTest(ctx)
+	if err != nil {
+		t.Fatalf("SelfTest() error = %v", err)
+	}
+	if !res.Passed || !res.Proof.Destroyed || !strings.Contains(res.Detail, "metadata_denied") {
+		t.Errorf("SelfTest() = %+v, want passed with the guest detail and a destroyed proof", res)
+	}
+	if got, err := h.c.ListMachines(ctx, map[string]string{"vmcp.selftest": "true"}); err != nil || len(got) != 0 {
+		t.Errorf("self-test machines left = %d, %v; want 0", len(got), err)
 	}
 }

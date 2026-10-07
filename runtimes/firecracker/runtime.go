@@ -224,6 +224,18 @@ func (r *Runtime) PrepareImage(ctx context.Context, id string, req api.ImageRequ
 	}, nil
 }
 
+// PrepareSelfTestImage builds the built-in self-test image under id.
+func (r *Runtime) PrepareSelfTestImage(ctx context.Context, id string) (machine.ImageInfo, error) {
+	dir := r.ImageDir(id)
+	_ = os.RemoveAll(dir)
+	meta, err := image.PrepareSelfTest(ctx, dir, r.cfg.AgentPath)
+	if err != nil {
+		return machine.ImageInfo{}, err
+	}
+	return machine.ImageInfo{ImageDigest: meta.ImageDigest, Compatibility: meta.Compatibility, SizeBytes: meta.SizeBytes,
+		Process: machine.ProcessConfig{Cmd: meta.Process.Cmd}}, nil
+}
+
 // ImageDir is the directory of a prepared image.
 func (r *Runtime) ImageDir(id string) string { return filepath.Join(r.imagesDir(), id) }
 
