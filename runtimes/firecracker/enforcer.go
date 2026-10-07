@@ -442,7 +442,28 @@ func parseElement(raw any) (element, bool) {
 	}
 	s := func(i int) string { v, _ := concat[i].(string); return v }
 	port, _ := concat[4].(float64)
-	return element{Tap: s(0), Guest: s(1), Host: s(2), Proto: s(3), Port: int(port)}, true
+	proto, ok := protoName(concat[3])
+	if !ok {
+		return element{}, false
+	}
+	return element{Tap: s(0), Guest: s(1), Host: s(2), Proto: proto, Port: int(port)}, true
+}
+
+// protoName returns the inet_proto field of an element. nft prints it as a
+// name or as an IP protocol number, depending on its version.
+func protoName(v any) (string, bool) {
+	switch p := v.(type) {
+	case string:
+		return p, p != ""
+	case float64:
+		switch p {
+		case 6:
+			return "tcp", true
+		case 17:
+			return "udp", true
+		}
+	}
+	return "", false
 }
 
 // restoreTable recreates the vmcp table and the elements of live machines.

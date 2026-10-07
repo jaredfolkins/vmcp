@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -103,10 +104,12 @@ func TestLiveFirecracker(t *testing.T) {
 	c := loadLiveCfg(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	logs := &liveLog{}
 	rt, err := New(ctx, Config{
 		StateRoot: c.StateRoot, JailBase: c.JailBase, KernelPath: c.KernelPath, AgentPath: c.AgentPath,
 		CgroupRoot: "/sys/fs/cgroup", CgroupParent: c.CgroupParent, InstallID: "live-gate",
 		UIDBase: 400000, Pool: netip.MustParsePrefix(c.Pool), DNSUpstreams: c.DNSUpstreams,
+		Logger: slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -200,6 +203,7 @@ func TestLiveFirecracker(t *testing.T) {
 			"gw=$(ip route | awk '/default/ {print $3}'); env -u http_proxy -u HTTP_PROXY wget -q -T 3 -O /dev/null http://$gw:8080/ && echo HOSTPORT_REACHED || echo HOSTPORT_DENIED",
 			"nslookup example.com >/dev/null 2>&1 && echo DNS_OK || echo DNS_FAILED",
 		}, "; ")
+		mark := logs.mark()
 		rec, res, _ := runLive(t, ctx, rt, "m-8899aabbccddeeff", 1, api.MachineSpec{
 			Network: api.Network{DNS: true, PublicEgress: true},
 			Process: api.Process{Args: []string{"/bin/sh", "-c", script}},
@@ -211,7 +215,44 @@ func TestLiveFirecracker(t *testing.T) {
 			}
 		}
 		checkProof(t, rt, res)
+		// The enforcer must own the network of a live machine. A stray
+		// removal or failure here means it misread the machine's rules.
+		for _, code := range []string{"enforcer_stray_removed", "enforcer_cleanup_failed", "enforcer_table_restored"} {
+			if line := logs.since(mark, code); line != "" {
+				t.Errorf("enforcer acted on a live machine's network: %s", line)
+			}
+		}
 	})
+}
+
+// liveLog keeps the runtime log of the live gate.
+type liveLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *liveLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *liveLog) mark() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Len()
+}
+
+// since returns the first line after mark with the code, or "".
+func (l *liveLog) since(mark int, code string) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, line := range strings.Split(l.buf.String()[mark:], "\n") {
+		if strings.Contains(line, `"code":"`+code+`"`) {
+			return line
+		}
+	}
+	return ""
 }
 
 // startLive provisions and boots a machine and waits for its posture

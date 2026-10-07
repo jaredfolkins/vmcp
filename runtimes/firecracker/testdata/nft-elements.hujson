@@ -1,0 +1,23 @@
+{
+  // nft -j listings of the vmcp table and the element keys that the
+  // enforcer must read from them. A wrong key makes the enforcer treat a
+  // live machine's allowed traffic as stray.
+  "listings": [
+    {
+      "name": "protocol as a number (nft 1.0.6)",
+      "listing": {"nftables": [{"set": {"family": "inet", "name": "guest_allow", "table": "vmcp", "elem": [
+        {"elem": {"val": {"concat": ["vmcp-b8248b08", "100.80.0.2", "100.80.0.1", 6, 53]}, "comment": "vmcp:i:m-1"}},
+        {"elem": {"val": {"concat": ["vmcp-b8248b08", "100.80.0.2", "100.80.0.1", 17, 53]}, "comment": "vmcp:i:m-1"}},
+        {"elem": {"val": {"concat": ["vmcp-b8248b08", "100.80.0.2", "100.80.0.1", 6, 3128]}, "comment": "vmcp:i:m-1"}},
+      ]}}]},
+      "want": ["vmcp-b8248b08|tcp|53", "vmcp-b8248b08|udp|53", "vmcp-b8248b08|tcp|3128"],
+    },
+    {
+      "name": "protocol as a name",
+      "listing": {"nftables": [{"set": {"family": "inet", "name": "guest_allow", "table": "vmcp", "elem": [
+        {"concat": ["vmcp-00000001", "100.80.0.6", "100.80.0.5", "udp", 53]},
+      ]}}]},
+      "want": ["vmcp-00000001|udp|53"],
+    },
+  ],
+}
