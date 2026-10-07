@@ -9,15 +9,16 @@ on a host and serves an HTTP API that runs and manages machines:
 - **Persistent machines** keep their disk and drives. You can stop, start,
   restart, attach to, expose ports of, snapshot, and restore them.
 
-> **Status: early.** The API in [`api/`](api/api.go) is a draft. Today
-> `vmcp serve` implements only the health and status routes. See
-> [BACKLOG.md](BACKLOG.md) for the work in progress.
+> **Status: early.** The API in [`api/`](api/api.go) is a draft. Ephemeral
+> machines work today: images, machines, start, stop, delete, drives,
+> events, and the runtime self-test. Restart, exec, console, ports, and
+> snapshots are planned. See [BACKLOG.md](BACKLOG.md).
 
 ## Runtimes
 
 | Runtime | Hosts | Status |
 | --- | --- | --- |
-| [Firecracker](runtimes/firecracker/) | Linux amd64: Debian 12, Ubuntu 24.04 | Firecracker and jailer `1.16.0` baked in; health and status |
+| [Firecracker](runtimes/firecracker/) | Linux amd64: Debian 12, Ubuntu 24.04 | Firecracker and jailer `1.16.0` baked in; ephemeral machines |
 | Apple [`container`](https://github.com/apple/container) | macOS 26, Apple silicon | Planned |
 
 One vmcp binary serves one runtime: the runtime of the OS it is built for.
@@ -53,26 +54,38 @@ umask 077
 head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > vmcp-credential
 
 docker run -d --name vmcp \
-  --user "$(id -u):$(id -g)" \
-  --group-add "$(getent group kvm | cut -d: -f3)" \
+  --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
   --device /dev/kvm --device /dev/net/tun \
+  --security-opt systempaths=unconfined \
+  --security-opt apparmor=unconfined \
+  --security-opt no-new-privileges \
+  --security-opt seccomp=runtimes/firecracker/deploy/seccomp.json \
+  --cap-drop ALL \
+  --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID \
+  --cap-add MKNOD --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE \
+  --cap-add SETUID --cap-add SETGID --cap-add SYS_ADMIN \
+  --cap-add SYS_CHROOT --cap-add SYS_RESOURCE \
   -v "$PWD/vmcp-credential:/run/secrets/vmcp-credential:ro" \
   -p 127.0.0.1:18080:8080 \
   vmcp:dev
 
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/health
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/ready
 curl -s -H "Authorization: Bearer $(cat vmcp-credential)" \
   http://127.0.0.1:18080/v1/status
+curl -s -X POST -H "Authorization: Bearer $(cat vmcp-credential)" \
+  http://127.0.0.1:18080/v1/selftest
 ```
 
-The health route answers `204`. The status route reports the runtime, the
-baked release, the host checks, and the host capacity.
+The ready route answers `204` when the runtime is ready. The status route
+reports the runtime, the baked release, the host checks, and the host
+capacity. The self-test boots a guest and proves from inside it that the
+host, private networks, and cloud metadata are unreachable.
 
-This local run uses your own user so that the container can read the
-credential, and it binds the port to loopback only. A production deployment
-runs vmcp as UID `65532` with a `0400` credential that this user owns, the
-runtime's seccomp and AppArmor profiles, and no published port. See
-[AGENTS.md](AGENTS.md#deployment).
+The jailer needs these capabilities and this seccomp profile; Docker's
+default profile blocks its `pivot_root`. vmcp runs as root in the container
+today. Running as UID `65532` and an AppArmor profile are on the backlog.
+This local run binds the port to loopback only. A deployment publishes no
+port. See [AGENTS.md](AGENTS.md#deployment).
 
 ## Host preparation
 
@@ -120,8 +133,11 @@ for contributors and coding agents.
 
 ```text
 api/                     HTTP contract
+client/                  Go client
 cmd/vmcp/                vmcp serve and vmcp healthcheck
+internal/machine/        runtime-neutral machine manager
 internal/server/         HTTP server and authentication
+e2e/                     end-to-end tests against a running vmcp
 runtimes/firecracker/    Firecracker runtime, baked release, installers
 Dockerfile               Linux service image
 AGENTS.md                rules for contributors and agents
