@@ -2,6 +2,15 @@
 // adds a kernel thread "kvm-nx-lpage-recovery-<firecracker pid>" to the
 // machine cgroup; the enforcer must ignore exactly that thread.
 {
+  // cgroup.procs as vmcp reads it in its own PID namespace: a task outside
+  // that namespace (the KVM worker on Linux 6.1) shows as 0.
+  "count_cases": [
+    {"name": "firecracker only", "procs": [100], "want_visible": [100], "want_hidden": 0},
+    {"name": "firecracker and the hidden KVM worker", "procs": [100, 0], "want_visible": [100], "want_hidden": 1},
+    {"name": "two hidden tasks", "procs": [100, 0, 0], "want_visible": [100], "want_hidden": 2, "want_violation": "tasks outside the vmcp PID namespace"},
+    {"name": "second visible process", "procs": [100, 101], "want_visible": [100, 101], "want_hidden": 0, "want_violation": "has 2 processes"},
+    {"name": "firecracker exited, worker left", "procs": [0], "want_visible": null, "want_hidden": 1}
+  ],
   // /proc/<pid>/stat lines and their flags field.
   "stat_cases": [
     {"name": "kernel thread", "stat": "1299226 (kvm-nx-lpage-recovery-1299222) S 2 0 0 0 -1 2129984 0 0 0 0 0 0 0 0 20 0 1 0 108766180 0 0", "flags": 2129984},

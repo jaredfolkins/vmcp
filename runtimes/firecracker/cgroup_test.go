@@ -58,12 +58,21 @@ func TestMountViolationSelf(t *testing.T) {
 
 var kvmWorkerConfig = flag.String("vmcp-kvm-worker-config", "testdata/kvm-worker.hujson", "HuJSON file with KVM worker filter cases")
 
-// TestDropKVMWorkers proves that the machine process list leaves out only
-// the KVM worker kernel thread of a process in the same cgroup. Before, on
-// Linux 6.1 the enforcer counted that thread as a second process and killed
+// TestDropKVMWorkers proves the one-process rule of a machine cgroup with
+// the KVM worker kernel thread of Linux 6.1: one task outside the vmcp PID
+// namespace (PID 0 in cgroup.procs) is allowed, a visible worker of a
+// process in the same cgroup is left out, and anything else is counted.
+// Before, the enforcer counted the worker as a second process and killed
 // every machine.
 func TestDropKVMWorkers(t *testing.T) {
 	var in struct {
+		CountCases []struct {
+			Name          string `json:"name"`
+			Procs         []int  `json:"procs"`
+			WantVisible   []int  `json:"want_visible"`
+			WantHidden    int    `json:"want_hidden"`
+			WantViolation string `json:"want_violation"`
+		} `json:"count_cases"`
 		StatCases []struct {
 			Name      string `json:"name"`
 			Stat      string `json:"stat"`
@@ -81,8 +90,18 @@ func TestDropKVMWorkers(t *testing.T) {
 		} `json:"filter_cases"`
 	}
 	readHuJSON(t, *kvmWorkerConfig, &in)
-	if len(in.StatCases) == 0 || len(in.FilterCases) == 0 {
+	if len(in.CountCases) == 0 || len(in.StatCases) == 0 || len(in.FilterCases) == 0 {
 		t.Fatal("KVM worker input has no cases")
+	}
+	for _, tc := range in.CountCases {
+		visible, hidden := splitHidden(tc.Procs)
+		if !slices.Equal(visible, tc.WantVisible) || hidden != tc.WantHidden {
+			t.Errorf("%s: splitHidden() = %v, %d; want %v, %d", tc.Name, visible, hidden, tc.WantVisible, tc.WantHidden)
+		}
+		v := machineProcsViolation(visible, hidden)
+		if (tc.WantViolation == "") != (v == "") || !strings.Contains(v, tc.WantViolation) {
+			t.Errorf("%s: machineProcsViolation() = %q, want %q", tc.Name, v, tc.WantViolation)
+		}
 	}
 	for _, tc := range in.StatCases {
 		got, err := statFlags(tc.Stat)

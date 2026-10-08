@@ -107,14 +107,49 @@ type procIdentity struct {
 	comm         string
 }
 
-// machinePIDs returns the processes of a machine cgroup without the KVM
-// worker thread of a process of the same cgroup.
-func machinePIDs(cgroup string) ([]int, error) {
-	pids, err := cgroupPIDs(cgroup)
+// maxHiddenMachineTasks is the number of tasks outside the vmcp PID
+// namespace that a machine cgroup may hold. cgroup.procs shows such a task
+// as PID 0. On Linux 6.1 it is the KVM worker kernel thread of the machine,
+// which lives in the initial PID namespace. A guest cannot create such a
+// task: the jailer and every process below it stay in PID namespaces below
+// the vmcp namespace, so vmcp sees them.
+const maxHiddenMachineTasks = 1
+
+// machineProcs returns the visible processes of a machine cgroup without
+// the KVM worker thread of a process of the same cgroup, and the number of
+// tasks that the vmcp PID namespace cannot see.
+func machineProcs(cgroup string) (pids []int, hidden int, err error) {
+	all, err := cgroupPIDs(cgroup)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return dropKVMWorkers(pids, readProcIdentity), nil
+	visible, hidden := splitHidden(all)
+	return dropKVMWorkers(visible, readProcIdentity), hidden, nil
+}
+
+// splitHidden separates the PID 0 entries of cgroup.procs, which are tasks
+// outside the reader's PID namespace, from the visible PIDs.
+func splitHidden(pids []int) (visible []int, hidden int) {
+	for _, p := range pids {
+		if p == 0 {
+			hidden++
+			continue
+		}
+		visible = append(visible, p)
+	}
+	return visible, hidden
+}
+
+// machineProcsViolation returns why the processes of a machine cgroup break
+// the one-process rule, or "".
+func machineProcsViolation(pids []int, hidden int) string {
+	switch {
+	case len(pids) > 1:
+		return fmt.Sprintf("machine cgroup has %d processes, want 1", len(pids))
+	case hidden > maxHiddenMachineTasks:
+		return fmt.Sprintf("machine cgroup has %d tasks outside the vmcp PID namespace, want at most %d", hidden, maxHiddenMachineTasks)
+	}
+	return ""
 }
 
 // dropKVMWorkers removes each KVM worker of a process in pids. A process is
@@ -220,12 +255,15 @@ func readThreadStatus(path string) (threadStatus, error) {
 // postureViolations checks every thread of every process in the cgroup
 // against the posture contract.
 func postureViolations(cgroup string, uid int) (threads int, violations []string, err error) {
-	pids, err := machinePIDs(cgroup)
+	pids, hidden, err := machineProcs(cgroup)
 	if err != nil {
 		return 0, nil, err
 	}
 	if len(pids) == 0 {
 		return 0, []string{"no process in machine cgroup"}, nil
+	}
+	if v := machineProcsViolation(pids, hidden); v != "" {
+		violations = append(violations, v)
 	}
 	selfMounts, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {

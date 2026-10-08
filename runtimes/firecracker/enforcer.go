@@ -171,14 +171,14 @@ func (e *enforcer) sweepCgroups() {
 		if !m.postureChecked() {
 			continue
 		}
-		pids, err := machinePIDs(p)
+		pids, hidden, err := machineProcs(p)
 		if err != nil || len(pids) == 0 {
-			// An empty cgroup means Firecracker exited: the machine is
+			// No visible process means Firecracker exited: the machine is
 			// ending and its teardown owns the cgroup. It is not a breach.
 			continue
 		}
-		if len(pids) > 1 {
-			e.violation(m, fmt.Sprintf("machine cgroup has %d processes, want 1", len(pids)))
+		if v := machineProcsViolation(pids, hidden); v != "" {
+			e.violation(m, v)
 			continue
 		}
 		if threads, v, err := postureViolations(p, m.uid); err == nil && threads > 0 && len(v) > 0 {
