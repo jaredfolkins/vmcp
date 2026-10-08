@@ -35,6 +35,11 @@ jobs:
         run: |
           set -euo pipefail
           reference="${IMAGE}:${SOURCE_COMMIT}"
+          docker buildx create \
+            --driver docker-container \
+            --name vmcp-candidate-builder \
+            --use
+          docker buildx inspect --bootstrap
           docker buildx build \
             --platform linux/amd64 \
             --provenance=false \
