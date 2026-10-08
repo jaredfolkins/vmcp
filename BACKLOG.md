@@ -19,7 +19,11 @@ that every item follows.
   stop, delete, recovery, self-test, the Go client, ownership tags, the
   posture contract, and the enforcer. The live gate and the end-to-end gate
   pass on a KVM host in the vmcp image. Commits `e737f33` to `e541a88`.
-  Open hardening: run vmcp as UID 65532 and add a vmcp AppArmor profile.
+- **V2 hardening.** vmcp runs as UID 65532 with file capabilities, each
+  tool and the jailer get only their own capabilities, and the AppArmor
+  profile `vmcp-<install-id>` confines the service in enforce mode. The
+  live gate and the end-to-end gate pass with no AppArmor denial. Commits
+  `a8262bb` and `cf751c1`.
 
 ## Next
 1. **V4 Install and upgrade.** `vmcp install` and the OS folder entry
@@ -27,6 +31,15 @@ that every item follows.
    supported OS, the live gate proves a fresh install, a same-version
    reinstall, an upgrade, an injected failure that rolls back, a teardown
    that leaves only the preserved state, and a purge that leaves nothing.
+   Status: `vmcp host check|install|teardown|status` (commit `5b4b833`)
+   install, verify, report, and remove the host resources by ownership
+   tags, also those of older versions. Their live gate passed on Ubuntu
+   24.04 amd64: install, a second install, teardown of planted older
+   tagged resources with untagged look-alikes left untouched, and nothing
+   tagged left. Open: the service transaction (lock, quiesce, journal,
+   service stop and start, verification with machines, rollback, purge,
+   and preserved state), the OS folder entry points, and the live gate on
+   Debian 12.
 2. **V5 Persistent machines.** Root disk, drives, stop, start, restart,
    restart policy, and preservation across upgrade. Accept: live gate.
 3. **V6 Exec, console, and ports.** Accept: live gate with allowed and

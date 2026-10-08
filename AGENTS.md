@@ -40,18 +40,42 @@
   agent, image preparation, network, Go brokers, and posture checks.
 - Create reserves a machine. Start provisions and boots it. A caller that
   needs launch evidence records it before start.
-- Live evidence on this host, inside the vmcp image with the vmcp seccomp
-  profile, `no-new-privileges`, and a dropped capability set:
-  - `TestLiveFirecracker` (runtimes/firecracker): process I/O, image user,
-    output drive, posture on every thread, egress allowed, metadata, private,
-    direct, and host-port access denied, DNS, and complete teardown.
-  - `TestEphemeralMachine` (e2e) through the running service and the Go
-    client: drives, events, redaction, egress, proof.
+- vmcp runs as UID and GID `65532` with file capabilities, the AppArmor
+  profile `vmcp-<install-id>` in enforce mode, and the vmcp seccomp
+  profile. See [Capabilities](#capabilities).
+- `vmcp host check|install|teardown|status` install, verify, report, and
+  remove the host resources of one install by their ownership tags. See
+  [Commands](#commands). The full V4 install transaction is not done.
+- Live evidence on 2026-10-08, commit `5b4b833`, on an Ubuntu 24.04 amd64
+  KVM host with kernel 7.0, AppArmor 4.0, and Docker 29, with the
+  commands in
+  [Container settings](#container-settings-proven-by-the-live-gate):
+  - `vmcp host install --install-id live-gate` wrote and verified every
+    resource. An earlier run of the same command also removed `vmcp-live`,
+    a cgroup that an older vmcp version had tagged `live-gate`.
+  - `TestLiveFirecracker` (runtimes/firecracker) in the vmcp image as UID
+    `65532`: process I/O, image user, output drive, posture on every
+    thread, egress allowed, metadata, private, direct, and host-port access
+    denied, DNS, the enforcer, and complete teardown. All five subtests
+    passed.
+  - `TestEphemeralMachine` (e2e) and the self-test through the service,
+    started by Compose with a named state volume, and the Go client:
+    drives, events, redaction, egress, proof. The service used the default
+    bridge network, because that host had no free Docker address pool for
+    a project network. A deployment with its own networks is NOT
+    VERIFIED.
+  - Each Firecracker thread had UID and GID `400000`, no capability,
+    `NoNewPrivs: 1`, `Seccomp: 2`, and the profile `vmcp-live-gate`.
+  - The kernel log had zero `apparmor="DENIED"` lines for
+    `vmcp-live-gate` during both gates, and no suppressed audit line. A
+    netlink audit listener saw zero records for the profile.
+  - `vmcp host teardown` removed every tagged resource, also planted older
+    ones under other names and depths, killed one planted process, and
+    reported five untagged look-alikes, which it did not touch. Two
+    installs in a row and a teardown left nothing tagged.
 - The enforcer runs in vmcp. The live gate proves that it removes a stray
   `vmcp-` tap, restores a flushed `vmcp` table, and kills a machine whose
   jail gains a setuid file or whose cgroup gains a foreign process.
-- Not done for V2: running vmcp as UID 65532 and a vmcp AppArmor profile.
-  vmcp runs as root inside its container today.
 - `runtimes/firecracker/release/` bakes in Firecracker `1.16.0` and jailer
   `1.16.0`, linux/amd64, verified against the upstream archive.
 - `runtimes/firecracker/installers/` has Debian 12 and Ubuntu 24.04 amd64 host
@@ -61,18 +85,72 @@
   names, operator paths, or build outputs.
 
 ### Container settings proven by the live gate
-`--cgroupns=host`, `-v /sys/fs/cgroup:/sys/fs/cgroup:rw`,
-`--security-opt systempaths=unconfined`, `--security-opt no-new-privileges`,
-`--security-opt seccomp=runtimes/firecracker/deploy/seccomp.json`,
-`--device /dev/kvm`, `--device /dev/net/tun`, `--cap-drop ALL`, and
-`--cap-add` CHOWN, DAC_OVERRIDE, FOWNER, FSETID, MKNOD, NET_ADMIN,
-NET_BIND_SERVICE, SETUID, SETGID, SYS_ADMIN, SYS_CHROOT, SYS_RESOURCE.
-Docker's default seccomp profile blocks the jailer `pivot_root`. AppArmor ran
-unconfined; a vmcp AppArmor profile is not written yet.
+Use exactly these settings. Each command below ran on 2026-10-08 with
+commit `5b4b833`.
+
+1. Build the image and install the host resources of the install, as root
+   in a one-shot privileged container:
+
+   ```bash
+   docker build -t vmcp:dev .
+   docker run --rm --user 0:0 --privileged --cgroupns=host --network host \
+     -v /etc:/host/etc -v /lib/modules:/lib/modules:ro \
+     -v /sys/fs/cgroup:/sys/fs/cgroup \
+     -v /sys/kernel/security:/sys/kernel/security \
+     vmcp:dev host install --install-id live-gate
+   ```
+
+2. Run vmcp with these options. Add the state volume, the credential, and
+   the network of the deployment:
+
+   ```bash
+   docker run --user 65532:65532 \
+     --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+     --security-opt apparmor=vmcp-live-gate \
+     --security-opt seccomp=/etc/vmcp/live-gate/seccomp.json \
+     --device /dev/kvm --device /dev/net/tun \
+     --cap-drop ALL \
+     --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID \
+     --cap-add MKNOD --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE \
+     --cap-add SETGID --cap-add SETUID --cap-add SYS_ADMIN \
+     vmcp:dev serve --install-id live-gate
+   ```
+
+3. The Firecracker live gate runs the test binary in a gate image:
+   `FROM vmcp:dev` with the output of
+   `CGO_ENABLED=0 go test -c -trimpath ./runtimes/firecracker` at
+   `/usr/local/bin/vmcp`, with the file capabilities of vmcp
+   (`setcap cap_chown,cap_dac_override,cap_fowner,cap_fsetid,cap_net_admin,cap_net_bind_service=eip`),
+   and `runtimes/firecracker/testdata/live.hujson` at
+   `/usr/share/vmcp/live.hujson`. The same profile and capabilities then
+   apply. Run it with the options of step 2, `--no-healthcheck` (the image
+   healthcheck would run the test binary), and the arguments
+   `-test.run '^TestLiveFirecracker$' -test.v -vmcp-live-config /usr/share/vmcp/live.hujson`.
+
+4. The end-to-end gate runs `vmcp serve` with the options of step 2, a
+   named volume at `/var/lib/vmcp`, the credential `.e2e/vmcp-credential`
+   at `/run/secrets/vmcp-credential`, and, for this local gate only, the
+   port on `127.0.0.1:18081`. Then it runs
+   `go test ./e2e -run TestEphemeralMachine -vmcp-e2e-config testdata/e2e.hujson`.
+
+5. Count the denials of each gate:
+   `sudo journalctl -k --since <start> | grep 'apparmor="DENIED"' | grep -c 'profile="vmcp-<install-id>"'`
+   must print `0`. The same window must have no
+   `kauditd_printk_skb: ... callbacks suppressed` line, because a
+   suppressed line can hide a denial.
+
+6. `vmcp host teardown --install-id live-gate` with the options of step 1
+   removes the install.
+
+Do not set `no-new-privileges`: it stops the kernel from granting file
+capabilities, and vmcp then refuses to start. `systempaths=unconfined`,
+`SYS_CHROOT`, and `SYS_RESOURCE` are not needed; the gates passed without
+them. Docker's default seccomp profile blocks the jailer `pivot_root`.
+
 vmcp must not be PID 1. With `--new-pid-ns` the jailer exits after it starts
 Firecracker, so Firecracker is reparented to PID 1, and vmcp does not reap
 processes that it did not start. The image runs `tini` as PID 1. Without it,
-each machine leaves a zombie Firecracker process.
+each machine leaves a zombie Firecracker process. Do not add `--init`.
 
 ## Scope And Budget
 - Do the selected backlog item and its acceptance checks. Then stop.
@@ -244,9 +322,12 @@ A caller uses vmcp in this order. Each step is a general API feature.
 ### Firecracker rules
 - Always use the jailer. Run each guest with a non-root UID and GID, a
   chroot, cgroup v2 limits, rlimits, and a new PID namespace.
-- vmcp runs with `no_new_privs` (the container `no-new-privileges` option),
-  so the jailer and every Firecracker process inherit it. `vmcp serve`
-  refuses to start without it.
+- vmcp runs without `no_new_privs`, because the container
+  `no-new-privileges` option stops the kernel from granting file
+  capabilities. Firecracker sets `no_new_privs` on each of its threads when
+  it installs its seccomp filters; the posture check proves it. `vmcp
+  serve` refuses to start without its capabilities. Its error names
+  `no-new-privileges` when that option is set.
 - Host and guest talk only over vsock. The guest agent sends events and the
   tar of each writable drive to the host. The host never mounts or parses a
   guest ext4 image.
@@ -258,14 +339,18 @@ A caller uses vmcp in this order. Each step is a general API feature.
 - The guest kernel and other large guest inputs are downloaded at image
   build time and pinned by SHA-256. They are never downloaded at install or
   run time.
-- vmcp runs as UID and GID `65532` with file or container capabilities, a
-  seccomp profile, and an AppArmor profile. Only development may run as root
-  and unconfined.
+- vmcp runs as UID and GID `65532` with file capabilities, the vmcp
+  seccomp profile, and the AppArmor profile `vmcp-<install-id>`. Only
+  development may run as root and unconfined.
 - Firecracker and the jailer are baked in. `runtimes/firecracker/release/` holds the
   gzip binaries and `release-v1.json`, the lock with the upstream archive URL
   and SHA-256 and each binary's size, SHA-256, and mode. vmcp writes a binary
   only after its size and SHA-256 match the lock. Never download at install
   or run time.
+- The image extracts the jailer from the baked release at build time and
+  sets its file capabilities. vmcp uses `/usr/libexec/vmcp/jailer` only
+  after its size, SHA-256, and file capabilities match, and it refuses a
+  jailer on a `nosuid` file system, which ignores file capabilities.
 - Firecracker and the jailer always come from the same upstream release.
 - Keep upstream `LICENSE`, `NOTICE`, and `THIRD-PARTY` from the same archive
   next to the binaries. Apache-2.0 requires them for redistribution.
@@ -281,21 +366,37 @@ A caller uses vmcp in this order. Each step is a general API feature.
 - `Dockerfile` builds the Linux image with the `vmcp` binary for the
   Firecracker runtime. The binary embeds the Firecracker release. Pin both
   base images by digest.
-- The image installs `iproute2`, `nftables`, `e2fsprogs`, and CA
-  certificates, and fetches the pinned guest kernel by SHA-256. Pin the
-  package versions in the release lane (V8).
+- The image installs `iproute2`, `nftables`, `e2fsprogs`, CA certificates,
+  `tini`, `apparmor` and `kmod` (for `vmcp host`), and `libcap2-bin`, and
+  fetches the pinned guest kernel by SHA-256. It creates the user `vmcp`
+  (`65532:65532`), removes every setuid and setgid bit, owns
+  `/var/lib/vmcp` by `65532` with mode `0700`, sets the file capabilities
+  in [Capabilities](#capabilities), and runs as `USER 65532:65532`. Pin the
+  package versions in the release lane (V8). The build arguments
+  `VMCP_VERSION` and `VMCP_COMMIT` go into the install receipt.
+- Run `vmcp host install --install-id <id>` before the service starts.
+  Run `vmcp host teardown --install-id <id>` after the service is removed
+  for good. See [Commands](#commands).
 - A Compose deployment runs vmcp as one service. It needs:
-  - user `65532:65532`, the capability set in
-    [Container settings](#container-settings-proven-by-the-live-gate) until
-    a live gate proves a smaller set, `/dev/kvm`, and `/dev/net/tun`;
-  - the vmcp AppArmor and seccomp profiles;
-  - binds for its state root with `rshared` propagation, `/sys/fs/cgroup`,
-    and the host network namespace read-only, plus a `/run/netns` tmpfs;
+  - `user: "65532:65532"`;
+  - `cap_drop: [ALL]` and `cap_add` `CHOWN`, `DAC_OVERRIDE`, `FOWNER`,
+    `FSETID`, `MKNOD`, `NET_ADMIN`, `NET_BIND_SERVICE`, `SETGID`,
+    `SETUID`, and `SYS_ADMIN`;
+  - `security_opt` `apparmor=vmcp-<id>` and
+    `seccomp=/etc/vmcp/<id>/seccomp.json`, and not `no-new-privileges`.
+    That option stops the kernel from granting the file capabilities of
+    vmcp and the jailer, and vmcp then refuses to start;
+  - `cgroup: host`, a read-write bind of `/sys/fs/cgroup`, and the devices
+    `/dev/kvm` and `/dev/net/tun`;
+  - a named volume at `/var/lib/vmcp`. A new named volume takes the owner
+    `65532` and mode `0700` from the image. A bind mount needs that owner
+    and mode;
   - the credential file at `/run/secrets/vmcp-credential`, owned by `65532`
     with mode `0400`. The caller mounts its own copy;
-  - only the private network that it shares with its caller, and no
-    `ports`; and
-  - the healthcheck `vmcp healthcheck`.
+  - only the private network that it shares with its caller, a network for
+    guest egress, and no `ports`;
+  - no `init`: `tini` in the image is PID 1; and
+  - the image healthcheck `vmcp healthcheck`.
 - One vmcp serves one caller on one host. Multi-host is a later decision.
 
 ## Host Install, Configuration, And Upgrade
@@ -341,6 +442,11 @@ unchanged.
 8. **Commit.** Write the install receipt only after step 7 passes. Release
    the lock.
 
+Today `vmcp host install` does the host part of steps 1, 5, 6, and 8: it
+checks the host, tears down the tagged host resources, writes the host
+configuration, verifies it from a fresh inventory, and writes its receipt.
+The service steps are V4 work.
+
 ### Preserved state
 Teardown keeps only this state, in the vmcp state root:
 
@@ -381,33 +487,142 @@ every other service on the host are not vmcp-owned.
   the first failed check, and the cleanup result.
 
 ### Commands
-- `vmcp check`, `vmcp install`, `vmcp teardown`, `vmcp purge` (with an
-  explicit confirmation flag), and `vmcp status`. Each writes one JSON
-  result. Configuration is one JSON file decoded strictly.
+- `vmcp host check|install|teardown|status --install-id <id>` manage the
+  host resources of one install. Each prints one JSON result on stdout and
+  exits with status 1 when `ok` is false. The command line is decoded
+  strictly. An unknown command, flag, or argument fails before any host
+  access.
+  - `check` verifies root, the host `/etc` mount, cgroup v2 with `cpu`,
+    `memory`, and `pids` on at the root, AppArmor, and CPU virtualization.
+    It makes no change.
+  - `install` runs `check`, then `teardown`, then writes
+    `/etc/vmcp/<id>/seccomp.json`, writes `/etc/apparmor.d/vmcp-<id>` and
+    loads it with `apparmor_parser -r -W` in enforce mode, creates the
+    parent cgroup `vmcp-<id>`, tags it, enables `cpu`, `memory`, and
+    `pids`, and delegates it (the directory, `cgroup.procs`,
+    `cgroup.subtree_control`, and `cgroup.threads`) to the service user,
+    loads `kvm`, `kvm_intel` or `kvm_amd`, and `tun` and writes
+    `/etc/modules-load.d/vmcp-<id>.conf`, and verifies all of it from a
+    fresh inventory. It writes `/etc/vmcp/<id>/receipt.json` (schema,
+    install ID, vmcp version and commit, Firecracker release, service UID
+    and GID, time) last. A second `install` tears down and rebuilds.
+    `--service-uid` and `--service-gid` (default `65532`) select the
+    service user. It refuses to start when an untagged or foreign resource
+    has one of its names.
+  - `teardown` removes every resource with the install tag. It kills the
+    processes of owned cgroups with `cgroup.kill`, waits, and reports them
+    in `killed_processes`. It removes cgroups children first, unloads and
+    removes profile files, and removes module files, configuration
+    directories, and host links. It refuses an owned directory that holds
+    an untagged file. It never touches an untagged resource, a resource of
+    another install, Docker objects, OS packages, or a loaded kernel
+    module. It reports them in `conflicts` and `other_installs`. Then it
+    verifies from a fresh inventory that nothing tagged is left.
+  - `status` prints the tagged inventory, the conflicts, the other
+    installs, and the receipt.
+- Run them as root from the vmcp image in a one-shot privileged container.
+  `--host-root` (default `/host`) holds the host `/etc`. The host network
+  namespace lets teardown find host links, `/sys/kernel/security` lets
+  `apparmor_parser` load profiles, and `/lib/modules` lets `modprobe` load
+  modules:
+
+  ```bash
+  docker run --rm --user 0:0 --privileged --cgroupns=host --network host \
+    -v /etc:/host/etc -v /lib/modules:/lib/modules:ro \
+    -v /sys/fs/cgroup:/sys/fs/cgroup \
+    -v /sys/kernel/security:/sys/kernel/security \
+    <vmcp image> host install --install-id <id>
+  ```
+
+- Stop the vmcp service of the install before `install` or `teardown`.
+  Teardown kills each process that it finds in an owned cgroup.
+- The log has one JSON line per step on stderr with `install_op` and
+  `install_id`. Spans: `host.<command>`, `host.check`, `host.inventory`,
+  `host.teardown`, `host.write.config`, `host.write.apparmor`,
+  `host.write.cgroup`, `host.write.modules`, and `host.verify`. `INFO`:
+  `host command started`, `host resource written`, `host resource
+  removed`, and `host command finished`. `WARN` codes: `host_conflict`,
+  `host_check_failed`, and `host_processes_killed`. `ERROR` codes:
+  `host_teardown_incomplete` and `host_<command>_failed`.
+- Not done (V4): `vmcp check`, `vmcp install`, `vmcp teardown`, `vmcp
+  purge` (with an explicit confirmation flag), and `vmcp status` of the
+  full transaction above, with the lock, quiesce, journal, service stop
+  and start, verification with machines, rollback, and preserved state.
+  Each will write one JSON result. Configuration will be one JSON file
+  decoded strictly.
 - An operator runs the OS folder entry point with root. Only that path may
   install a missing OS package.
-- A caller's installer may call `vmcp install`. It first stops creating
-  machines and waits until no ephemeral machine exists. An automatic
-  upgrade does not change OS packages.
+- A caller's installer may call `vmcp host install` and, later, `vmcp
+  install`. It first stops creating machines and waits until no ephemeral
+  machine exists. An automatic upgrade does not change OS packages.
 
 ## Runtime Security
 
 ### Ownership tags
 - Tag every host resource that vmcp creates with its install identity:
   - cgroups: the `trusted.vmcp.owner` extended attribute on the parent
-    cgroup and on each machine cgroup;
-  - files: an owner marker in the state root and in each jail root;
+    cgroup `vmcp-<install-id>`. A cgroup inside a tagged cgroup, such as a
+    machine cgroup, belongs to the same install unless it has another tag;
+  - host text files: the first line `# vmcp-owner: <install-id>`, as in
+    `/etc/apparmor.d/vmcp-<install-id>` and
+    `/etc/modules-load.d/vmcp-<install-id>.conf`;
+  - host JSON files: the marker `/etc/vmcp/<install-id>/.vmcp-owner`. Its
+    first line is the owner line. Each other line names one file of that
+    directory that vmcp wrote, such as `seccomp.json` and `receipt.json`;
+  - AppArmor: the profile name `vmcp-<install-id>`;
+  - state-root files: an owner marker in the state root and in each jail
+    root;
   - network: the `vmcp-` name prefix and an `ifalias` of
-    `vmcp:<install>:<machine>` on each tap and veth device;
+    `vmcp:<install>:<machine>` on each tap and veth device. vmcp creates
+    them in its container network namespace; teardown also scans the host
+    network namespace;
   - nftables: the one `vmcp` table, with the machine ID in each rule
     comment.
-- Inventory, teardown, and status work from these tags. vmcp deletes only
-  tagged resources. It reports an untagged or conflicting resource and does
-  not touch it.
+- Inventory, teardown, and status find resources by these tags, never by
+  the names that the current version writes. So teardown also removes what
+  older versions created. vmcp deletes only tagged resources. It reports an
+  untagged resource with a vmcp name, or a resource of another install, and
+  does not touch it.
+- An install identity is 1 to 32 lowercase letters, digits, and inner
+  hyphens.
+
+### Capabilities
+vmcp runs as UID `65532`. Each process gets only the capabilities in this
+table. The live gate proved each set: without a listed capability, the gate
+fails, except where the notes below say otherwise.
+
+| Process | Capabilities | Source |
+| --- | --- | --- |
+| `tini` | none | |
+| `vmcp` | `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID`, `NET_ADMIN`, `NET_BIND_SERVICE` | file capabilities `=eip` on `/usr/local/bin/vmcp` |
+| `ip` and `nft` that change state, `nft` listings | `NET_ADMIN` | ambient set |
+| `ip` link listings | none | |
+| `mke2fs` | `DAC_OVERRIDE` | ambient set |
+| jailer | `CHOWN`, `DAC_OVERRIDE`, `MKNOD`, `SETGID`, `SETUID`, `SYS_ADMIN` | file capabilities `=ep` on `/usr/libexec/vmcp/jailer` |
+| Firecracker | none | |
+
+- The container capability set is the union of the file capabilities. A
+  file capability that is not in the container set makes the exec fail.
+- Do not give the jailer ambient capabilities. A jailer that runs as UID
+  `65532` keeps them across its UID change and gives them to Firecracker.
+  The file capabilities of the jailer clear the ambient set, so Firecracker
+  starts with none.
+- vmcp needs `DAC_OVERRIDE` also to open `/dev/kvm`, which hosts often own
+  by `root:kvm` with mode `0660`.
+- `FSETID` keeps the setgid bits of image files whose group vmcp is not in.
+  The gate image has no such file, so the gate does not prove it.
+- `NET_BIND_SERVICE` lets the DNS broker bind port 53. Docker sets
+  `net.ipv4.ip_unprivileged_port_start=0` in a container network
+  namespace, so the gate also passed without it. vmcp keeps it, so that
+  the broker does not depend on that setting.
+- The jailer writes `+cpu`, `+memory`, and `+pids` into
+  `cgroup.subtree_control` of each ancestor of its cgroup, also of the
+  root. The profile allows that one root file.
 
 ### Posture contract
 After boot, every thread of a jailed Firecracker process must have:
-UID and GID `65532`; zero effective, permitted, and ambient capabilities;
+the machine UID and GID (`--uid-base` plus the machine slot, never the
+vmcp UID `65532`); zero effective, permitted, and ambient capabilities;
 `NoNewPrivs: 1`; `Seccomp: 2`; the jail chroot; PID 1 in its own PID
 namespace; and its machine cgroup with memory, CPU, and pids limits. Its jail
 root holds only the expected files, with no setuid or setgid file and no
@@ -449,7 +664,7 @@ device node other than the ones the jailer creates.
 ```text
 api/                                public HTTP contract
 client/                             Go client for callers (V2)
-cmd/vmcp/                           serve, healthcheck, and install commands
+cmd/vmcp/                           serve, healthcheck, and host commands
 internal/server/                    HTTP server and authentication
 internal/trace/                     W3C trace context, spans, and the log handler
 internal/install/                   teardown-first install transaction (V4)
@@ -458,7 +673,7 @@ runtimes/firecracker/release/       baked Firecracker and jailer, lock, licenses
 runtimes/firecracker/installers/<kernel>/<distribution>/<version>/<arch>/
 runtimes/firecracker/cmd/           guest binaries (V2)
 runtimes/firecracker/internal/      jail, launch, network, brokers, rootfs, guest (V2)
-runtimes/firecracker/deploy/        seccomp and AppArmor profiles (V2)
+runtimes/firecracker/deploy/        seccomp profile and AppArmor profile template
 Dockerfile                          Linux service image
 docs/                               design, security, and ADRs
 ```
@@ -506,7 +721,8 @@ keeps that true.
 - Every `WARN` and `ERROR` line has a fixed `code`. A failure line has an
   `error` attribute with the cause, cut by `trace.BoundedError`.
 - Use these attribute names: `machine`, `machine_name`, `image`,
-  `snapshot`, `exec_session`, `install_op`, `drive`, `upstream`, `route`,
+  `snapshot`, `exec_session`, `install_op`, `install_id`, `drive`,
+  `upstream`, `route`,
   `status`, `duration_ms`, and `code`. Durations are milliseconds from
   `trace.Millis`.
 

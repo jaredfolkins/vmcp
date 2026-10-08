@@ -37,6 +37,10 @@ One vmcp binary serves one runtime: the runtime of the OS it is built for.
   own chroot, cgroup, and PID namespace. A guest reaches only brokered DNS,
   policy-controlled public egress, and the exact upstream services in its
   spec. Host and private networks and cloud metadata are always denied.
+- **Non-root and confined.** vmcp runs as UID `65532` with file
+  capabilities, its own AppArmor profile, and a seccomp profile. Each tool
+  and the jailer get only the capabilities that they need. Firecracker
+  gets none.
 - **Tokens stay on the host.** An upstream token in a request is used only
   by a host broker. It never enters a guest and is never returned or logged.
 - **Debuggable log.** One JSON line per API call and per machine step.
@@ -45,33 +49,43 @@ One vmcp binary serves one runtime: the runtime of the OS it is built for.
   `debug`, `info`, `warn`, or `error`.
 - **Install tears down first.** Every install, upgrade, and rollback removes
   everything that vmcp owns except the state needed to upgrade, then installs
-  again and verifies with real machines.
+  again and verifies with real machines. Every host resource carries the
+  install identity, so teardown removes only what vmcp made, from any vmcp
+  version.
 
 ## Quick start
 
-You need Linux amd64 with `/dev/kvm`, `/dev/net/tun`, cgroup v2, and Docker.
+You need Linux amd64 with `/dev/kvm`, `/dev/net/tun`, cgroup v2, AppArmor,
+and Docker.
 
 ```bash
 docker build -t vmcp:dev .
 
+# Install the host resources of install "dev": the AppArmor profile
+# vmcp-dev, /etc/vmcp/dev/seccomp.json, the parent cgroup vmcp-dev, and
+# the KVM and TUN modules.
+docker run --rm --user 0:0 --privileged --cgroupns=host --network host \
+  -v /etc:/host/etc -v /lib/modules:/lib/modules:ro \
+  -v /sys/fs/cgroup:/sys/fs/cgroup \
+  -v /sys/kernel/security:/sys/kernel/security \
+  vmcp:dev host install --install-id dev
+
 umask 077
 head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > vmcp-credential
 
-docker run -d --name vmcp \
+docker run -d --name vmcp --user 65532:65532 \
   --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
   --device /dev/kvm --device /dev/net/tun \
-  --security-opt systempaths=unconfined \
-  --security-opt apparmor=unconfined \
-  --security-opt no-new-privileges \
-  --security-opt seccomp=runtimes/firecracker/deploy/seccomp.json \
+  --security-opt apparmor=vmcp-dev \
+  --security-opt seccomp=/etc/vmcp/dev/seccomp.json \
   --cap-drop ALL \
   --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID \
   --cap-add MKNOD --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE \
-  --cap-add SETUID --cap-add SETGID --cap-add SYS_ADMIN \
-  --cap-add SYS_CHROOT --cap-add SYS_RESOURCE \
+  --cap-add SETGID --cap-add SETUID --cap-add SYS_ADMIN \
+  -v vmcp-state:/var/lib/vmcp \
   -v "$PWD/vmcp-credential:/run/secrets/vmcp-credential:ro" \
   -p 127.0.0.1:18080:8080 \
-  vmcp:dev
+  vmcp:dev serve --install-id dev
 
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/ready
 curl -s -H "Authorization: Bearer $(cat vmcp-credential)" \
@@ -85,11 +99,82 @@ reports the runtime, the baked release, the host checks, and the host
 capacity. The self-test boots a guest and proves from inside it that the
 host, private networks, and cloud metadata are unreachable.
 
-The jailer needs these capabilities and this seccomp profile; Docker's
-default profile blocks its `pivot_root`. vmcp runs as root in the container
-today. Running as UID `65532` and an AppArmor profile are on the backlog.
-This local run binds the port to loopback only. A deployment publishes no
-port. See [AGENTS.md](AGENTS.md#deployment).
+vmcp runs as UID `65532`. Its capabilities come from file capabilities on
+the vmcp binary and on the jailer, so do not set `no-new-privileges`: it
+stops the kernel from granting them, and vmcp then refuses to start.
+Docker's default seccomp profile blocks the jailer `pivot_root`; use the
+seccomp profile that `vmcp host install` writes. This local run binds the
+port to loopback only. A deployment publishes no port. See
+[AGENTS.md](AGENTS.md#deployment).
+
+To remove it:
+
+```bash
+docker rm -f vmcp && docker volume rm vmcp-state
+docker run --rm --user 0:0 --privileged --cgroupns=host --network host \
+  -v /etc:/host/etc -v /lib/modules:/lib/modules:ro \
+  -v /sys/fs/cgroup:/sys/fs/cgroup \
+  -v /sys/kernel/security:/sys/kernel/security \
+  vmcp:dev host teardown --install-id dev
+```
+
+## Host install
+
+`vmcp host check|install|teardown|status --install-id <id>` manage the host
+resources of one install. They run as root from the vmcp image in a
+one-shot privileged container with the flags above, and each prints one
+JSON result.
+
+| Command | What it does |
+| --- | --- |
+| `check` | Checks root, the host `/etc` mount, cgroup v2, AppArmor, and CPU virtualization. No change. |
+| `install` | Runs `check` and `teardown`, then writes the seccomp profile, the AppArmor profile `vmcp-<id>` (loaded in enforce mode), the parent cgroup `vmcp-<id>` delegated to UID `65532`, and the KVM and TUN module file. It verifies them and writes `/etc/vmcp/<id>/receipt.json` last. |
+| `teardown` | Removes every host resource with the tag of the install, also from older vmcp versions. |
+| `status` | Prints the tagged inventory and the receipt. |
+
+Every host resource carries the install identity: the first line
+`# vmcp-owner: <id>` of each host text file, a marker file in
+`/etc/vmcp/<id>/`, the `trusted.vmcp.owner` attribute of the parent cgroup,
+the profile name `vmcp-<id>`, and the alias `vmcp:<id>:...` of host links.
+Teardown finds resources by these tags and removes only them. It reports an
+untagged look-alike or a resource of another install and does not touch it.
+Stop the vmcp service before `install` or `teardown`.
+
+## Compose
+
+A Compose service for install `<id>`, after `vmcp host install`:
+
+```yaml
+services:
+  vmcp:
+    image: <vmcp image by digest>
+    user: "65532:65532"
+    command: ["serve", "--install-id", "<id>"]
+    cgroup: host
+    devices:
+      - /dev/kvm:/dev/kvm:rwm
+      - /dev/net/tun:/dev/net/tun:rwm
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, FSETID, MKNOD, NET_ADMIN,
+              NET_BIND_SERVICE, SETGID, SETUID, SYS_ADMIN]
+    security_opt:
+      - apparmor=vmcp-<id>
+      - seccomp=/etc/vmcp/<id>/seccomp.json
+    volumes:
+      - vmcp-state:/var/lib/vmcp
+      - type: bind
+        source: /sys/fs/cgroup
+        target: /sys/fs/cgroup
+      - type: bind
+        source: <credential file, owner 65532, mode 0400>
+        target: /run/secrets/vmcp-credential
+        read_only: true
+    networks: [<private network shared with the caller>, <egress network>]
+volumes:
+  vmcp-state: {}
+```
+
+Do not add `no-new-privileges`, `init`, or `ports`.
 
 ## Host preparation
 
@@ -138,12 +223,13 @@ for contributors and coding agents.
 ```text
 api/                     HTTP contract
 client/                  Go client
-cmd/vmcp/                vmcp serve and vmcp healthcheck
+cmd/vmcp/                vmcp serve, healthcheck, and host
 internal/machine/        runtime-neutral machine manager
 internal/server/         HTTP server and authentication
 internal/trace/          W3C trace context, spans, and the log handler
 e2e/                     end-to-end tests against a running vmcp
-runtimes/firecracker/    Firecracker runtime, baked release, installers
+runtimes/firecracker/    Firecracker runtime, baked release, installers,
+                         seccomp profile, AppArmor profile template
 Dockerfile               Linux service image
 AGENTS.md                rules for contributors and agents
 BACKLOG.md               work list
