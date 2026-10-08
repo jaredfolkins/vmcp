@@ -73,6 +73,32 @@
     ones under other names and depths, killed one planted process, and
     reported five untagged look-alikes, which it did not touch. Two
     installs in a row and a teardown left nothing tagged.
+- Live evidence of the host boot on 2026-10-08, commit `5557d4a`, on the
+  same host, with steps 1, 2, 4, 5, and 6 of
+  [Container settings](#container-settings-proven-by-the-live-gate). See
+  [Host boot](#host-boot):
+  - `vmcp host install --install-id live-gate` wrote and verified
+    `/etc/tmpfiles.d/vmcp-live-gate.conf`.
+  - A simulated boot of the parent cgroup: with no process and no child
+    cgroup in it, `rmdir` removed `/sys/fs/cgroup/vmcp-live-gate`. Then
+    `systemd-tmpfiles --create /etc/tmpfiles.d/vmcp-live-gate.conf`
+    (systemd 255) created it again with no error. The directory,
+    `cgroup.procs`, `cgroup.subtree_control`, and `cgroup.threads` had
+    owner `65532:65532`, `trusted.vmcp.owner` was `live-gate`, and the
+    parent enabled `cpu memory pids`. Owners, modes, tag, and controllers
+    were the same as after the install. `vmcp host status` reported the
+    install as installed.
+  - `vmcp serve` became healthy in the recreated cgroup.
+    `TestEphemeralMachine` and `TestSelfTest` (e2e) passed. The kernel log
+    had zero `apparmor="DENIED"` lines for `vmcp-live-gate` and no
+    suppressed audit line.
+  - `vmcp host teardown` removed the tmpfiles file with every other
+    resource, also a planted tagged file under an older name, and reported
+    a planted untagged `vmcp-*.conf` look-alike, which it did not touch. A
+    fresh `vmcp host status` showed nothing tagged.
+  - A real host reboot is NOT VERIFIED. At a real boot, the root
+    `cgroup.subtree_control` must enable `cpu`, `memory`, and `pids` when
+    systemd-tmpfiles-setup runs; that is NOT VERIFIED.
 - The enforcer runs in vmcp. The live gate proves that it removes a stray
   `vmcp-` tap, restores a flushed `vmcp` table, and kills a machine whose
   jail gains a setuid file or whose cgroup gains a foreign process.
@@ -86,7 +112,8 @@
 
 ### Container settings proven by the live gate
 Use exactly these settings. Each command below ran on 2026-10-08 with
-commit `5b4b833`.
+commit `5b4b833`. Steps 1, 2, 4, 5, and 6 ran again with commit
+`5557d4a`.
 
 1. Build the image and install the host resources of the install, as root
    in a one-shot container with the host-command settings:
@@ -485,13 +512,50 @@ with an explicit flag that deletes those snapshots.
 - mounts, broker processes, and broker files;
 - the installed release and prepared images;
 - scratch files, recovery records, and self-test markers; and
-- vmcp-owned host configuration, such as kernel module persistence and the
-  loaded AppArmor profile.
+- vmcp-owned host configuration, such as kernel module persistence, the
+  boot file of the parent cgroup, and the loaded AppArmor profile.
 
 Teardown deletes only resources that it can prove vmcp owns. It never
 adopts, re-owns, or recursively deletes unowned or conflicting state. It
 stops and reports the conflict. OS packages, Docker Engine, the kernel, and
 every other service on the host are not vmcp-owned.
+
+### Host boot
+The cgroup file system is empty after a host boot. Without its parent
+cgroup, `vmcp serve` refuses to start. These host files of an install
+bring its resources back before Docker starts the vmcp service:
+
+- `apparmor.service` loads `/etc/apparmor.d/vmcp-<id>`;
+- `systemd-modules-load.service` loads the modules of
+  `/etc/modules-load.d/vmcp-<id>.conf`; and
+- `systemd-tmpfiles-setup.service`, which runs before `sysinit.target`,
+  applies `/etc/tmpfiles.d/vmcp-<id>.conf`. Its lines give the parent
+  cgroup the state that `vmcp host install` gives it:
+
+  ```text
+  # vmcp-owner: <id>
+  d /sys/fs/cgroup/vmcp-<id> 0755 root root - -
+  t /sys/fs/cgroup/vmcp-<id> - - - - trusted.vmcp.owner=<id>
+  w /sys/fs/cgroup/vmcp-<id>/cgroup.subtree_control - - - - +cpu +memory +pids
+  z /sys/fs/cgroup/vmcp-<id>/cgroup.procs - 65532 65532 - -
+  z /sys/fs/cgroup/vmcp-<id>/cgroup.subtree_control - 65532 65532 - -
+  z /sys/fs/cgroup/vmcp-<id>/cgroup.threads - 65532 65532 - -
+  z /sys/fs/cgroup/[v]mcp-<id> - 65532 65532 - -
+  ```
+
+Keep this form. systemd-tmpfiles refuses to change a file owned by root in
+a directory owned by another user (an unsafe path transition). So the `d`
+line creates the directory as root, and the `z` lines give the delegated
+files to the service user first. The last line gives the directory to the
+service user. It is a glob that matches only the directory, because
+systemd-tmpfiles applies glob lines after all other lines. With the
+service user on the `d` line, the `z` lines of the files fail.
+
+The `w` line needs `cpu`, `memory`, and `pids` in the root
+`cgroup.subtree_control`, as `vmcp host check` does. The service UID and
+GID come from `--service-uid` and `--service-gid`. The live gate
+simulated the boot of the parent cgroup only; a real host reboot is NOT
+VERIFIED (see [Current State](#current-state)).
 
 ### Failure and rollback
 - A failure before teardown leaves the host unchanged.
@@ -517,7 +581,9 @@ every other service on the host are not vmcp-owned.
     parent cgroup `vmcp-<id>`, tags it, enables `cpu`, `memory`, and
     `pids`, and delegates it (the directory, `cgroup.procs`,
     `cgroup.subtree_control`, and `cgroup.threads`) to the service user,
-    loads `kvm`, `kvm_intel` or `kvm_amd`, and `tun` and writes
+    writes `/etc/tmpfiles.d/vmcp-<id>.conf`, which creates the parent
+    cgroup again at each host boot (see [Host boot](#host-boot)), loads
+    `kvm`, `kvm_intel` or `kvm_amd`, and `tun` and writes
     `/etc/modules-load.d/vmcp-<id>.conf`, and verifies all of it from a
     fresh inventory. It writes `/etc/vmcp/<id>/receipt.json` (schema,
     install ID, vmcp version and commit, Firecracker release, service UID
@@ -528,11 +594,11 @@ every other service on the host are not vmcp-owned.
   - `teardown` removes every resource with the install tag. It kills the
     processes of owned cgroups with `cgroup.kill`, waits, and reports them
     in `killed_processes`. It removes cgroups children first, unloads and
-    removes profile files, and removes module files, configuration
-    directories, and host links. It refuses an owned directory that holds
-    an untagged file. It never touches an untagged resource, a resource of
-    another install, Docker objects, OS packages, or a loaded kernel
-    module. It reports them in `conflicts` and `other_installs`. Then it
+    removes profile files, and removes module files, tmpfiles files,
+    configuration directories, and host links. It refuses an owned
+    directory that holds an untagged file. It never touches an untagged
+    resource, a resource of another install, Docker objects, OS packages,
+    or a loaded kernel module. It reports them in `conflicts` and `other_installs`. Then it
     verifies from a fresh inventory that nothing tagged is left.
   - `status` prints the tagged inventory, the conflicts, the other
     installs, and the receipt.
@@ -560,7 +626,8 @@ every other service on the host are not vmcp-owned.
 - The log has one JSON line per step on stderr with `install_op` and
   `install_id`. Spans: `host.<command>`, `host.check`, `host.inventory`,
   `host.teardown`, `host.write.config`, `host.write.apparmor`,
-  `host.write.cgroup`, `host.write.modules`, and `host.verify`. `INFO`:
+  `host.write.cgroup`, `host.write.tmpfiles`, `host.write.modules`, and
+  `host.verify`. `INFO`:
   `host command started`, `host resource written`, `host resource
   removed`, and `host command finished`. `WARN` codes: `host_conflict`,
   `host_check_failed`, and `host_processes_killed`. `ERROR` codes:
@@ -585,8 +652,10 @@ every other service on the host are not vmcp-owned.
     cgroup `vmcp-<install-id>`. A cgroup inside a tagged cgroup, such as a
     machine cgroup, belongs to the same install unless it has another tag;
   - host text files: the first line `# vmcp-owner: <install-id>`, as in
-    `/etc/apparmor.d/vmcp-<install-id>` and
-    `/etc/modules-load.d/vmcp-<install-id>.conf`;
+    `/etc/apparmor.d/vmcp-<install-id>`,
+    `/etc/modules-load.d/vmcp-<install-id>.conf`, and
+    `/etc/tmpfiles.d/vmcp-<install-id>.conf`. The tools that read these
+    files see the line as a comment;
   - host JSON files: the marker `/etc/vmcp/<install-id>/.vmcp-owner`. Its
     first line is the owner line. Each other line names one file of that
     directory that vmcp wrote, such as `seccomp.json` and `receipt.json`;

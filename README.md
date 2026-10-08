@@ -62,8 +62,8 @@ and Docker.
 docker build -t vmcp:dev .
 
 # Install the host resources of install "dev": the AppArmor profile
-# vmcp-dev, /etc/vmcp/dev/seccomp.json, the parent cgroup vmcp-dev, and
-# the KVM and TUN modules.
+# vmcp-dev, /etc/vmcp/dev/seccomp.json, the parent cgroup vmcp-dev, the
+# KVM and TUN modules, and the files that bring them back at host boot.
 docker run --rm --user 0:0 --cgroupns=host --network host \
   --cap-drop ALL \
   --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID \
@@ -138,7 +138,7 @@ JSON result.
 | Command | What it does |
 | --- | --- |
 | `check` | Checks root, the host `/etc` mount, cgroup v2, AppArmor, and CPU virtualization. No change. |
-| `install` | Runs `check` and `teardown`, then writes the seccomp profile, the AppArmor profile `vmcp-<id>` (loaded in enforce mode), the parent cgroup `vmcp-<id>` delegated to UID `65532`, and the KVM and TUN module file. It verifies them and writes `/etc/vmcp/<id>/receipt.json` last. |
+| `install` | Runs `check` and `teardown`, then writes the seccomp profile, the AppArmor profile `vmcp-<id>` (loaded in enforce mode), the parent cgroup `vmcp-<id>` delegated to UID `65532`, `/etc/tmpfiles.d/vmcp-<id>.conf`, which creates that cgroup again at each host boot, and the KVM and TUN module file. It verifies them and writes `/etc/vmcp/<id>/receipt.json` last. |
 | `teardown` | Removes every host resource with the tag of the install, also from older vmcp versions. |
 | `status` | Prints the tagged inventory and the receipt. |
 
@@ -149,6 +149,14 @@ the profile name `vmcp-<id>`, and the alias `vmcp:<id>:...` of host links.
 Teardown finds resources by these tags and removes only them. It reports an
 untagged look-alike or a resource of another install and does not touch it.
 Stop the vmcp service before `install` or `teardown`.
+
+A host reboot empties the cgroup file system. The install brings itself
+back before Docker starts the service: AppArmor loads the profile,
+`systemd-modules-load` loads the modules, and `systemd-tmpfiles-setup`
+creates the parent cgroup with its tag, its controllers, and its
+delegation to the service user. A live gate proved the cgroup part with
+`systemd-tmpfiles --create` after the cgroup was removed. A real reboot
+is not verified yet. See [AGENTS.md](AGENTS.md#host-boot).
 
 ## Compose
 
