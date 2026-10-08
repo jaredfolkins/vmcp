@@ -1,0 +1,120 @@
+// Host command cases for the fake host of hostinstall_test.go. Paths of
+// files are under the host root; paths of cgroups are under the cgroup
+// root.
+{
+  "install_id": "live-gate",
+  // A host with resources of install live-gate from this and from older
+  // vmcp versions, resources of another install, and untagged look-alikes.
+  "teardown": {
+    "cgroups": [
+      {"path": "vmcp-live-gate", "owner": "live-gate"},
+      // A machine cgroup with a live process: teardown kills it.
+      {"path": "vmcp-live-gate/vmcp-0123456789", "procs": "4242\n"},
+      // An older layout, deeper in the tree.
+      {"path": "vmcp-live-gate/older/deeper"},
+      {"path": "system.slice/vmcp-old-parent", "owner": "live-gate"},
+      {"path": "system.slice/vmcp-old-parent/vmcp-9876543210"},
+      {"path": "system.slice/docker-0123.scope"},
+      {"path": "vmcp-other-site", "owner": "other-site"},
+      {"path": "vmcp-other-site/vmcp-aaaaaaaaaa", "procs": "77\n"},
+      {"path": "vmcp-lookalike"},
+      {"path": "user.slice"},
+    ],
+    "files": {
+      "etc/apparmor.d/vmcp-live-gate": "# vmcp-owner: live-gate\nprofile vmcp-live-gate {}\n",
+      "etc/apparmor.d/vmcp-live-gate-v0": "# vmcp-owner: live-gate\nprofile vmcp-live-gate-v0 {}\n",
+      "etc/apparmor.d/vmcp-foreign": "profile vmcp-foreign {}\n",
+      "etc/apparmor.d/vmcp-other-site": "# vmcp-owner: other-site\nprofile vmcp-other-site {}\n",
+      "etc/apparmor.d/usr.bin.example": "profile example {}\n",
+      // An owner line that is not the first line is not a tag.
+      "etc/apparmor.d/vmcp-late-tag": "profile vmcp-late-tag {}\n# vmcp-owner: live-gate\n",
+      "etc/modules-load.d/vmcp-live-gate.conf": "# vmcp-owner: live-gate\nkvm\nkvm_intel\ntun\n",
+      "etc/modules-load.d/vmcp-old-name.conf": "# vmcp-owner: live-gate\ntun\n",
+      "etc/modules-load.d/modules.conf": "loop\n",
+      "etc/vmcp/live-gate/.vmcp-owner": "# vmcp-owner: live-gate\nseccomp.json\nreceipt.json\n",
+      "etc/vmcp/live-gate/seccomp.json": "{}\n",
+      "etc/vmcp/live-gate-old/.vmcp-owner": "# vmcp-owner: live-gate\nseccomp.json\n",
+      "etc/vmcp/live-gate-old/seccomp.json": "{}\n",
+      "etc/vmcp/other-site/.vmcp-owner": "# vmcp-owner: other-site\nseccomp.json\n",
+      "etc/vmcp/other-site/seccomp.json": "{}\n",
+    },
+    // vmcp-live-gate//jail has no file: it goes with its parent.
+    "loaded_profiles": {
+      "vmcp-live-gate": "enforce",
+      "vmcp-live-gate-v0": "complain",
+      "vmcp-other-site": "enforce",
+      "vmcp-foreign": "enforce",
+      "docker-default": "enforce",
+    },
+    "links": [
+      {"ifname": "vmcp-11111111", "ifalias": "vmcp:live-gate:m-1111111111111111"},
+      {"ifname": "vmcp-22222222", "ifalias": "vmcp:other-site:m-2222222222222222"},
+      {"ifname": "vmcp-33333333", "ifalias": ""},
+      {"ifname": "eth0", "ifalias": ""},
+    ],
+    "want_removed": [
+      "link vmcp-11111111",
+      "cgroup vmcp-live-gate",
+      "cgroup system.slice/vmcp-old-parent",
+      "apparmor-profile vmcp-live-gate",
+      "apparmor-file /etc/apparmor.d/vmcp-live-gate",
+      "apparmor-profile vmcp-live-gate-v0",
+      "apparmor-file /etc/apparmor.d/vmcp-live-gate-v0",
+      "modules-load /etc/modules-load.d/vmcp-live-gate.conf",
+      "modules-load /etc/modules-load.d/vmcp-old-name.conf",
+      "config-file /etc/vmcp/live-gate/seccomp.json",
+      "config-dir /etc/vmcp/live-gate",
+      "config-file /etc/vmcp/live-gate-old/seccomp.json",
+      "config-dir /etc/vmcp/live-gate-old",
+    ],
+    "want_killed_processes": 1,
+    "want_conflicts": [
+      "cgroup vmcp-lookalike",
+      "apparmor-file /etc/apparmor.d/vmcp-foreign",
+      "apparmor-file /etc/apparmor.d/vmcp-late-tag",
+      "link vmcp-33333333",
+    ],
+    "want_other_installs": [
+      "cgroup vmcp-other-site",
+      "apparmor-file /etc/apparmor.d/vmcp-other-site",
+      "config-dir /etc/vmcp/other-site",
+      "link vmcp-22222222",
+    ],
+    "want_kept_profiles": ["vmcp-other-site", "vmcp-foreign", "docker-default"],
+  },
+  // A file that the marker of an owned directory does not name. Teardown
+  // refuses the directory and leaves it as it is.
+  "untagged_config_file": {
+    "files": {
+      "etc/vmcp/live-gate/.vmcp-owner": "# vmcp-owner: live-gate\nseccomp.json\n",
+      "etc/vmcp/live-gate/seccomp.json": "{}\n",
+      "etc/vmcp/live-gate/operator-notes.txt": "keep\n",
+    },
+    "want_conflicts": ["config-file /etc/vmcp/live-gate/operator-notes.txt"],
+  },
+  // Untagged resources with the names that the install writes. Install
+  // refuses and writes nothing.
+  "blocked_install": {
+    "cgroups": [{"path": "vmcp-live-gate"}],
+    "files": {"etc/apparmor.d/vmcp-live-gate": "profile vmcp-live-gate {}\n"},
+    "loaded_profiles": {"vmcp-live-gate": "enforce"},
+    "want_conflicts": [
+      "cgroup vmcp-live-gate",
+      "apparmor-file /etc/apparmor.d/vmcp-live-gate",
+      "apparmor-profile vmcp-live-gate",
+    ],
+  },
+  // The log of a host install: each line by message, with its level and
+  // code.
+  "install_log": [
+    {"msg": "host command started", "level": "INFO"},
+    {"msg": "host resource written", "level": "INFO"},
+    {"msg": "span", "level": "DEBUG", "span": "host.write.cgroup"},
+    {"msg": "span", "level": "DEBUG", "span": "host.verify"},
+    {"msg": "host command finished", "level": "INFO"},
+  ],
+  "blocked_log": [
+    {"msg": "host conflict", "level": "WARN", "code": "host_conflict"},
+    {"msg": "host command failed", "level": "ERROR", "code": "host_install_failed"},
+  ],
+}

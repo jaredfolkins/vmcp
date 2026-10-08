@@ -4,10 +4,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/netip"
+	"path/filepath"
 	"strings"
 
 	"github.com/jaredfolkins/vmcp/internal/machine"
@@ -83,4 +87,54 @@ func splitList(s string) []string {
 		}
 	}
 	return out
+}
+
+// hostCommand runs vmcp host check, install, teardown, or status. It
+// prints one JSON result and fails when the result is not OK. Run it as
+// root in a one-shot privileged container; AGENTS.md lists the flags.
+func hostCommand(ctx context.Context, args []string, out io.Writer, log *slog.Logger) error {
+	if len(args) == 0 {
+		return errors.New("usage: vmcp host check|install|teardown|status --install-id ID [flags]")
+	}
+	command := args[0]
+	switch command {
+	case "check", "install", "teardown", "status":
+	default:
+		return fmt.Errorf("unknown host command %q", command)
+	}
+	fs := flag.NewFlagSet("host "+command, flag.ContinueOnError)
+	installID := fs.String("install-id", "", "install identity that tags every host resource (required)")
+	hostRoot := fs.String("host-root", "/host", "directory that holds the host /etc as <host-root>/etc")
+	uid, gid := 65532, 65532
+	if command == "install" {
+		fs.IntVar(&uid, "service-uid", uid, "UID of the vmcp service; the parent cgroup is delegated to it")
+		fs.IntVar(&gid, "service-gid", gid, "GID of the vmcp service")
+	}
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	switch {
+	case fs.NArg() > 0:
+		return fmt.Errorf("host %s takes no arguments, got %q", command, fs.Args())
+	case *installID == "":
+		return errors.New("--install-id is required")
+	case !filepath.IsAbs(*hostRoot):
+		return fmt.Errorf("--host-root %q must be an absolute path", *hostRoot)
+	case uid < 0 || gid < 0:
+		return errors.New("--service-uid and --service-gid must not be negative")
+	}
+	res := firecracker.RunHostCommand(ctx, command, firecracker.HostConfig{
+		InstallID: *installID, HostRoot: filepath.Clean(*hostRoot), CgroupRoot: "/sys/fs/cgroup",
+		SecurityFS: "/sys/kernel/security", CPUInfo: "/proc/cpuinfo", ServiceUID: uid, ServiceGID: gid,
+		Version: version, Commit: commit, Logger: log,
+	})
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(res); err != nil {
+		return fmt.Errorf("write host result: %w", err)
+	}
+	if !res.OK {
+		return errReported
+	}
+	return nil
 }

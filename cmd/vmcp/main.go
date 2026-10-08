@@ -4,6 +4,7 @@
 //
 //	vmcp serve [flags]
 //	vmcp healthcheck [--url URL]
+//	vmcp host check|install|teardown|status --install-id ID [flags]
 package main
 
 import (
@@ -28,24 +29,39 @@ const (
 	shutdownTimeout  = 10 * time.Second
 )
 
+// version and commit identify the build. The image build sets them.
+var (
+	version = "dev"
+	commit  = "unknown"
+)
+
+// errReported is a failure that its command already logged and reported.
+var errReported = errors.New("command failed")
+
 func main() {
 	level := new(slog.LevelVar)
 	log := slog.New(trace.NewHandler(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 	if err := run(os.Args[1:], log, level); err != nil {
-		log.Error("vmcp failed", "code", "vmcp_failed", "error", err)
+		if !errors.Is(err, errReported) {
+			log.Error("vmcp failed", "code", "vmcp_failed", "error", err)
+		}
 		os.Exit(1)
 	}
 }
 
 func run(args []string, log *slog.Logger, level *slog.LevelVar) error {
 	if len(args) == 0 {
-		return errors.New("usage: vmcp serve|healthcheck [flags]")
+		return errors.New("usage: vmcp serve|healthcheck|host [flags]")
 	}
 	switch args[0] {
 	case "serve":
 		return serve(args[1:], log, level)
 	case "healthcheck":
 		return healthcheck(args[1:])
+	case "host":
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return hostCommand(ctx, args[1:], os.Stdout, log)
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}

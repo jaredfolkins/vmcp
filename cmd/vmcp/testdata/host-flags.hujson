@@ -1,0 +1,14 @@
+// Host command lines that vmcp refuses before it reads or changes the
+// host. Each error names the problem.
+{
+  "refused": [
+    {"args": [], "want_error": "usage"},
+    {"args": ["upgrade", "--install-id", "live-gate"], "want_error": "unknown host command"},
+    {"args": ["install"], "want_error": "--install-id is required"},
+    {"args": ["install", "--install-id", "live-gate", "extra"], "want_error": "takes no arguments"},
+    {"args": ["status", "--install-id", "live-gate", "--force"], "want_error": "flag provided but not defined"},
+    {"args": ["teardown", "--install-id", "live-gate", "--service-uid", "0"], "want_error": "flag provided but not defined"},
+    {"args": ["check", "--install-id", "live-gate", "--host-root", "host"], "want_error": "absolute path"},
+    {"args": ["install", "--install-id", "live-gate", "--service-uid", "-1"], "want_error": "must not be negative"},
+  ],
+}

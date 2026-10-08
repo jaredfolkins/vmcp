@@ -10,7 +10,7 @@
 # capabilities on the vmcp binary and on the jailer. Run the image with the
 # settings in AGENTS.md (Deployment). Do not set no-new-privileges: it stops
 # the kernel from granting file capabilities. Do not publish its port on a
-# host interface.
+# host interface. Run vmcp host commands with --user 0:0.
 
 FROM golang:1.26.2-bookworm@sha256:47ce5636e9936b2c5cbf708925578ef386b4f8872aec74a67bd13a627d242b19 AS build
 WORKDIR /src
@@ -21,8 +21,10 @@ COPY client ./client
 COPY cmd ./cmd
 COPY runtimes ./runtimes
 COPY internal ./internal
+ARG VMCP_VERSION=dev
+ARG VMCP_COMMIT=unknown
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -trimpath -ldflags='-s -w -buildid=' -o /out/vmcp ./cmd/vmcp \
+    go build -trimpath -ldflags="-s -w -buildid= -X main.version=${VMCP_VERSION} -X main.commit=${VMCP_COMMIT}" -o /out/vmcp ./cmd/vmcp \
  && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags='-s -w -buildid=' -o /out/vmcp-agent ./runtimes/firecracker/cmd/vmcp-agent \
  && gzip -dc runtimes/firecracker/release/linux/amd64/jailer.gz > /out/jailer
@@ -31,10 +33,11 @@ FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bb
 LABEL org.opencontainers.image.title="vmcp" \
       org.opencontainers.image.source="https://github.com/jaredfolkins/vmcp" \
       org.opencontainers.image.licenses="NOASSERTION"
+# apparmor and kmod serve vmcp host install (apparmor_parser, modprobe).
 # libcap2-bin sets the file capabilities below.
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      iproute2 nftables e2fsprogs ca-certificates tini libcap2-bin \
+      iproute2 nftables e2fsprogs ca-certificates tini apparmor kmod libcap2-bin \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 65532 vmcp \
  && useradd --system --uid 65532 --gid 65532 --no-create-home \
