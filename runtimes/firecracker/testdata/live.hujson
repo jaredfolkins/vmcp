@@ -1,11 +1,14 @@
 // Live gate input for TestLiveFirecracker. Run it inside the vmcp image
-// with the devices and capabilities in AGENTS.md (Deployment).
+// as UID 65532 with the settings in AGENTS.md (Container settings proven
+// by the live gate), after vmcp host install --install-id live-gate.
 {
   "state_root": "/var/lib/vmcp",
   "jail_base": "/var/lib/vmcp/jail",
   "kernel_path": "/usr/share/vmcp/vmlinux",
   "agent_path": "/usr/libexec/vmcp/vmcp-agent",
-  "cgroup_parent": "vmcp-live",
+  "jailer_path": "/usr/libexec/vmcp/jailer",
+  // The parent cgroup of install live-gate, which the test uses.
+  "cgroup_parent": "vmcp-live-gate",
   "pool": "100.80.0.0/16",
   "dns_upstreams": ["1.1.1.1:53", "8.8.8.8:53"],
   // busybox 1.37.0 image index; the runtime selects linux/amd64.

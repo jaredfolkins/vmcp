@@ -27,13 +27,21 @@ import (
 	"github.com/jaredfolkins/vmcp/internal/machine"
 )
 
-var liveConfig = flag.String("vmcp-live-config", "", "HuJSON file for the Firecracker live gate")
+var (
+	liveConfig = flag.String("vmcp-live-config", "", "HuJSON file for the Firecracker live gate")
+	// liveIntruder makes TestLiveIntruder sleep. The enforcer subtest runs
+	// the test binary with it as a process that intrudes into a machine
+	// cgroup. The AppArmor profile lets vmcp run only its own binary and
+	// its tools, so the gate uses no other program.
+	liveIntruder = flag.Bool("vmcp-live-intruder", false, "sleep as the intruding process of the live gate")
+)
 
 type liveCfg struct {
 	StateRoot      string   `json:"state_root"`
 	JailBase       string   `json:"jail_base"`
 	KernelPath     string   `json:"kernel_path"`
 	AgentPath      string   `json:"agent_path"`
+	JailerPath     string   `json:"jailer_path"`
 	CgroupParent   string   `json:"cgroup_parent"`
 	Pool           string   `json:"pool"`
 	DNSUpstreams   []string `json:"dns_upstreams"`
@@ -110,7 +118,7 @@ func TestLiveFirecracker(t *testing.T) {
 	logs := &liveLog{}
 	rt, err := New(ctx, Config{
 		StateRoot: c.StateRoot, JailBase: c.JailBase, KernelPath: c.KernelPath, AgentPath: c.AgentPath,
-		CgroupRoot: "/sys/fs/cgroup", CgroupParent: c.CgroupParent, InstallID: "live-gate",
+		JailerPath: c.JailerPath, CgroupRoot: "/sys/fs/cgroup", CgroupParent: c.CgroupParent, InstallID: "live-gate",
 		UIDBase: 400000, Pool: netip.MustParsePrefix(c.Pool), DNSUpstreams: c.DNSUpstreams,
 		Logger: slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
@@ -233,7 +241,7 @@ func TestLiveFirecracker(t *testing.T) {
 			t.Fatal(err)
 		}
 		waitFor(t, 5*time.Second, "vmcp table restore", func() bool {
-			out, err := exec.Command("nft", "-j", "list", "table", "inet", nftTable).Output()
+			out, err := toolCommand(ctx, netAdminCaps, "nft", "-j", "list", "table", "inet", nftTable).Output()
 			return err == nil && chainRuleCount(out) == expectedChainRules
 		})
 
@@ -250,7 +258,11 @@ func TestLiveFirecracker(t *testing.T) {
 		}
 
 		m2, _ := startLive(t, ctx, rt, "m-aaaa000000000002", 3, "sleep 60")
-		intruder := exec.Command("sleep", "100")
+		self, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		intruder := exec.Command(self, "-test.run=^TestLiveIntruder$", "-vmcp-live-intruder")
 		if err := intruder.Start(); err != nil {
 			t.Fatal(err)
 		}
@@ -298,6 +310,15 @@ func TestLiveFirecracker(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestLiveIntruder is not a test. With -vmcp-live-intruder it sleeps as
+// the process that the enforcer subtest moves into a machine cgroup.
+func TestLiveIntruder(t *testing.T) {
+	if !*liveIntruder {
+		t.Skip("only the live gate runs it, as an intruding process")
+	}
+	time.Sleep(100 * time.Second)
 }
 
 // liveLog keeps the runtime log of the live gate.

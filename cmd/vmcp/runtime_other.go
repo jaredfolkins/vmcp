@@ -17,6 +17,8 @@ func (f *runtimeFlags) register(*flag.FlagSet) {}
 
 func (f *runtimeFlags) attrs() []any { return nil }
 
+func checkProcess() error { return nil }
+
 func newRuntime(context.Context, runtimeFlags, *slog.Logger) (machine.Runtime, string, error) {
 	return nil, "", errors.New("vmcp has no runtime for this operating system yet")
 }

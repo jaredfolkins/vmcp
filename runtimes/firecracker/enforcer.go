@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -284,7 +283,7 @@ func (e *enforcer) sweepTaps(ctx context.Context) {
 		m := owned[l.Name]
 		if m == nil {
 			name := l.Name
-			e.stray("tap", name, func() bool { return run(ctx, nil, "ip", "link", "show", "dev", name) == nil },
+			e.stray("tap", name, func() bool { return linkExists(ctx, name) },
 				func() error { return run(ctx, nil, "ip", "link", "del", "dev", name) })
 			continue
 		}
@@ -300,9 +299,7 @@ type link struct {
 }
 
 func listLinks(ctx context.Context) ([]link, error) {
-	cmd := exec.CommandContext(ctx, "ip", "-j", "link", "show")
-	cmd.Env = []string{toolPath, "LC_ALL=C"}
-	out, err := cmd.Output()
+	out, err := toolCommand(ctx, nil, "ip", "-j", "link", "show").Output()
 	if err != nil {
 		return nil, err
 	}
@@ -313,9 +310,7 @@ func listLinks(ctx context.Context) ([]link, error) {
 // sweepTable restores the vmcp table when its chains changed, and removes
 // set elements that no live machine owns.
 func (e *enforcer) sweepTable(ctx context.Context) {
-	cmd := exec.CommandContext(ctx, "nft", "-j", "list", "table", "inet", nftTable)
-	cmd.Env = []string{toolPath, "LC_ALL=C"}
-	out, err := cmd.Output()
+	out, err := toolCommand(ctx, netAdminCaps, "nft", "-j", "list", "table", "inet", nftTable).Output()
 	if ctx.Err() != nil {
 		// vmcp is stopping. A failed listing is not a changed table.
 		return
@@ -351,9 +346,7 @@ func (e *enforcer) sweepTable(ctx context.Context) {
 
 // elementExists reports whether the guest_allow set holds el now.
 func elementExists(ctx context.Context, el element) bool {
-	cmd := exec.CommandContext(ctx, "nft", "-j", "list", "table", "inet", nftTable)
-	cmd.Env = []string{toolPath, "LC_ALL=C"}
-	out, err := cmd.Output()
+	out, err := toolCommand(ctx, netAdminCaps, "nft", "-j", "list", "table", "inet", nftTable).Output()
 	if err != nil {
 		return true
 	}

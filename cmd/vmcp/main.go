@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -68,7 +67,7 @@ func serve(args []string, log *slog.Logger, level *slog.LevelVar) error {
 	}
 	log.Info("vmcp starting", append([]any{"log_level", level.Level().String(), "listen", *listen,
 		"max_machines", *maxMachines}, rf.attrs()...)...)
-	if err := requireNoNewPrivs(); err != nil {
+	if err := checkProcess(); err != nil {
 		return err
 	}
 	credential, err := server.LoadCredential(*credentialFile)
@@ -115,22 +114,6 @@ func serve(args []string, log *slog.Logger, level *slog.LevelVar) error {
 	}
 	log.Info("vmcp stopped")
 	return nil
-}
-
-// requireNoNewPrivs refuses to run unless no_new_privs is set. Every
-// jailer and VMM process inherits it. Run the container with
-// no-new-privileges.
-func requireNoNewPrivs() error {
-	b, err := os.ReadFile("/proc/self/status")
-	if err != nil {
-		return fmt.Errorf("read process status: %w", err)
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		if v, ok := strings.CutPrefix(line, "NoNewPrivs:"); ok && strings.TrimSpace(v) == "1" {
-			return nil
-		}
-	}
-	return errors.New("vmcp needs no_new_privs; run it with the no-new-privileges security option")
 }
 
 // healthcheck exits with an error unless the health route answers 204.

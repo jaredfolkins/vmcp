@@ -18,6 +18,10 @@ import (
 	"github.com/jaredfolkins/vmcp/internal/trace"
 )
 
+// cgroupControllers are the controllers that the jailer limits. vmcp host
+// install enables them in the parent cgroup.
+var cgroupControllers = []string{"cpu", "memory", "pids"}
+
 // killCgroup kills every process in the cgroup and waits until it is
 // empty. A missing cgroup is not an error.
 func killCgroup(path string) error {

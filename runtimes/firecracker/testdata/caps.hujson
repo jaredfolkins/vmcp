@@ -1,0 +1,36 @@
+// Capability cases for caps_test.go.
+{
+  // Process status lines. vmcp starts only when its permitted set holds
+  // every service capability. The error names no-new-privileges when it
+  // is set, because it stops the kernel from granting file capabilities.
+  "process": [
+    {
+      "name": "file capabilities granted",
+      "status": "Name:\tvmcp\nCapInh:\t0000000000000000\nCapPrm:\t000000000000141b\nCapEff:\t000000000000141b\nNoNewPrivs:\t0\n",
+    },
+    {
+      "name": "root in development",
+      "status": "CapPrm:\t000001ffffffffff\nNoNewPrivs:\t0\n",
+    },
+    {
+      "name": "no-new-privileges stopped the file capabilities",
+      "status": "CapPrm:\t0000000000000000\nNoNewPrivs:\t1\n",
+      "want_error": "no-new-privileges",
+    },
+    {
+      "name": "container lacks NET_ADMIN",
+      "status": "CapPrm:\t000000000000041b\nNoNewPrivs:\t0\n",
+      "want_error": "NET_ADMIN",
+    },
+    {"name": "no permitted set", "status": "Name:\tvmcp\n", "want_error": "no permitted capability set"},
+  ],
+  // security.capability values in hex, as setcap writes them.
+  "file": [
+    // setcap cap_chown,cap_dac_override,cap_mknod,cap_setgid,cap_setuid,cap_sys_admin=ep
+    {"name": "jailer set, revision 2", "xattr": "01000002c3002008000000000000000000000000", "permitted": "00000000082000c3", "effective": true},
+    {"name": "jailer set, revision 3", "xattr": "01000003c300200800000000000000000000000000000000", "permitted": "00000000082000c3", "effective": true},
+    {"name": "permitted only", "xattr": "0000000201000000000000000000000000000000", "permitted": "0000000000000001", "effective": false},
+    {"name": "revision 1", "xattr": "0100000101000000", "want_error": "not supported"},
+    {"name": "short", "xattr": "0100", "want_error": "too short"},
+  ],
+}

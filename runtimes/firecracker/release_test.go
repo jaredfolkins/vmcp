@@ -2,6 +2,8 @@ package firecracker
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -47,5 +49,38 @@ func TestArtifactVerifyRejectsChangedBytes(t *testing.T) {
 	}
 	if err := a.verify(data[:len(data)-1]); err == nil {
 		t.Error("verify(short content) error = nil, want a size mismatch")
+	}
+}
+
+// TestVerifyArtifactFileChecksTheFile proves that an installed binary is
+// accepted only when it holds the exact locked bytes. The image extracts
+// the jailer at build time; vmcp must refuse a changed or wrong file.
+func TestVerifyArtifactFileChecksTheFile(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteArtifact(&buf, "jailer"); err != nil {
+		t.Fatalf("WriteArtifact(jailer) error = %v", err)
+	}
+	dir := t.TempDir()
+	good := filepath.Join(dir, "jailer")
+	if err := os.WriteFile(good, buf.Bytes(), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyArtifactFile(good, "jailer"); err != nil {
+		t.Errorf("VerifyArtifactFile(locked bytes) error = %v, want nil", err)
+	}
+	if err := VerifyArtifactFile(good, "firecracker"); err == nil {
+		t.Error("VerifyArtifactFile(jailer bytes as firecracker) error = nil, want a mismatch")
+	}
+	changed := bytes.Clone(buf.Bytes())
+	changed[len(changed)/2] ^= 0xff
+	bad := filepath.Join(dir, "changed")
+	if err := os.WriteFile(bad, changed, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyArtifactFile(bad, "jailer"); err == nil {
+		t.Error("VerifyArtifactFile(changed bytes) error = nil, want a SHA-256 mismatch")
+	}
+	if err := VerifyArtifactFile(dir, "jailer"); err == nil {
+		t.Error("VerifyArtifactFile(directory) error = nil, want a refusal")
 	}
 }

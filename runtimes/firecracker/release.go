@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path"
 )
 
@@ -92,6 +93,36 @@ func WriteArtifact(w io.Writer, name string) error {
 		return fmt.Errorf("write firecracker artifact %q: %w", name, err)
 	}
 	return nil
+}
+
+// VerifyArtifactFile checks that the file at p is the named baked binary:
+// one regular file with the locked size and SHA-256.
+func VerifyArtifactFile(p, name string) error {
+	r, err := BakedRelease()
+	if err != nil {
+		return err
+	}
+	a, ok := r.artifact(name)
+	if !ok {
+		return fmt.Errorf("firecracker release has no artifact %q", name)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return fmt.Errorf("open firecracker artifact %q: %w", name, err)
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect firecracker artifact %q: %w", name, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("firecracker artifact %q at %s is not a regular file", name, p)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, a.Size+1))
+	if err != nil {
+		return fmt.Errorf("read firecracker artifact %q: %w", name, err)
+	}
+	return a.verify(data)
 }
 
 func (r Release) validate() error {

@@ -383,6 +383,8 @@ func (m *Machine) Boot(ctx context.Context) error {
 	cmd.Env = []string{toolPath}
 	out := &limitWriter{w: serial, n: serialLogLimit}
 	cmd.Stdout, cmd.Stderr = out, out
+	// No ambient capabilities: the jailer gets jailerCaps from its file.
+	// Ambient capabilities would pass through the jailer to Firecracker.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		_ = serial.Close()

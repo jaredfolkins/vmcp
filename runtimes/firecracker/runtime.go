@@ -13,17 +13,14 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
-
-	"golang.org/x/sys/unix"
+	"syscall"
 
 	"github.com/jaredfolkins/vmcp/api"
 	"github.com/jaredfolkins/vmcp/internal/machine"
 	"github.com/jaredfolkins/vmcp/runtimes/firecracker/internal/image"
 )
-
-// ownerXattr tags every cgroup that vmcp owns with its install identity.
-const ownerXattr = "trusted.vmcp.owner"
 
 // Config is the host configuration of the Firecracker runtime.
 type Config struct {
@@ -36,9 +33,14 @@ type Config struct {
 	KernelPath string
 	// AgentPath is the static guest agent binary.
 	AgentPath string
+	// JailerPath is the baked jailer in the image, with the file
+	// capabilities in jailerCaps. vmcp uses it only after its size and
+	// SHA-256 match the release lock.
+	JailerPath string
 	// CgroupRoot is the cgroup v2 mount, normally /sys/fs/cgroup.
 	CgroupRoot string
-	// CgroupParent is the parent cgroup name for every machine.
+	// CgroupParent is the parent cgroup name for every machine. vmcp host
+	// install creates it and delegates it to the vmcp user.
 	CgroupParent string
 	// InstallID tags every host resource that this install owns.
 	InstallID string
@@ -66,8 +68,9 @@ type Runtime struct {
 	enf         *enforcer
 }
 
-// New prepares the host: it installs the baked binaries, creates and tags
-// the parent cgroup, and replaces the vmcp nftables table. It starts the
+// New prepares the runtime: it checks the process capabilities, the baked
+// jailer, and the parent cgroup that vmcp host install delegated, installs
+// Firecracker, and replaces the vmcp nftables table. It starts the
 // enforcer, which runs until ctx ends.
 func New(ctx context.Context, cfg Config) (*Runtime, error) {
 	if cfg.Logger == nil {
@@ -76,8 +79,11 @@ func New(ctx context.Context, cfg Config) (*Runtime, error) {
 	if cfg.HTTP == nil {
 		cfg.HTTP = http.DefaultClient
 	}
-	if cfg.InstallID == "" || strings.ContainsAny(cfg.InstallID, " \t\n\"") {
-		return nil, errors.New("install ID is required and must not contain spaces or quotes")
+	if err := ValidInstallID(cfg.InstallID); err != nil {
+		return nil, err
+	}
+	if err := checkProcessCapabilities("/proc/self/status"); err != nil {
+		return nil, err
 	}
 	rel, err := BakedRelease()
 	if err != nil {
@@ -96,16 +102,17 @@ func New(ctx context.Context, cfg Config) (*Runtime, error) {
 	if r.firecracker, err = r.installBinary("firecracker"); err != nil {
 		return nil, err
 	}
-	if r.jailer, err = r.installBinary("jailer"); err != nil {
+	if err := checkJailer(cfg.JailerPath); err != nil {
 		return nil, err
 	}
+	r.jailer = cfg.JailerPath
 	if err := r.installKernel(); err != nil {
 		return nil, err
 	}
 	if r.compat, err = image.AgentCompatibility(cfg.AgentPath); err != nil {
 		return nil, fmt.Errorf("hash guest agent: %w", err)
 	}
-	if err := r.prepareCgroup(); err != nil {
+	if err := r.checkCgroupParent(); err != nil {
 		return nil, err
 	}
 	if err := setupTable(ctx); err != nil {
@@ -150,23 +157,28 @@ func (r *Runtime) installBinary(name string) (string, error) {
 	return p, nil
 }
 
-// prepareCgroup creates the parent cgroup, enables the controllers that the
-// jailer limits, and tags it. It refuses an existing parent that another
-// owner tagged.
-func (r *Runtime) prepareCgroup() error {
+// checkCgroupParent verifies the parent cgroup. vmcp host install creates
+// it, tags it, enables the controllers that the jailer limits, and
+// delegates it to the vmcp user. vmcp does not create it.
+func (r *Runtime) checkCgroupParent() error {
 	p := r.cgroupParent()
-	if err := os.Mkdir(p, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
-		return fmt.Errorf("create parent cgroup: %w", err)
+	fi, err := os.Stat(p)
+	if err != nil {
+		return fmt.Errorf("parent cgroup %s is missing; run vmcp host install: %w", p, err)
 	}
-	owner := make([]byte, 256)
-	if n, err := unix.Getxattr(p, ownerXattr, owner); err == nil && string(owner[:n]) != r.cfg.InstallID {
-		return fmt.Errorf("parent cgroup %s belongs to another owner", p)
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !fi.IsDir() || !ok || int(st.Uid) != os.Geteuid() {
+		return fmt.Errorf("parent cgroup %s is not delegated to UID %d; run vmcp host install", p, os.Geteuid())
 	}
-	if err := unix.Setxattr(p, ownerXattr, []byte(r.cfg.InstallID), 0); err != nil {
-		return fmt.Errorf("tag parent cgroup: %w", err)
+	b, err := os.ReadFile(filepath.Join(p, "cgroup.subtree_control"))
+	if err != nil {
+		return fmt.Errorf("read parent cgroup controllers: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(p, "cgroup.subtree_control"), []byte("+cpu +memory +pids"), 0o644); err != nil {
-		return fmt.Errorf("enable cgroup controllers: %w", err)
+	enabled := strings.Fields(string(b))
+	for _, c := range cgroupControllers {
+		if !slices.Contains(enabled, c) {
+			return fmt.Errorf("parent cgroup %s does not enable the %s controller; run vmcp host install", p, c)
+		}
 	}
 	return nil
 }

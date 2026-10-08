@@ -11,6 +11,9 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -135,7 +138,7 @@ func removeTap(ctx context.Context, g guestNet, tag string) error {
 	if len(g.Allowed) > 0 {
 		_ = run(ctx, nil, "nft", "delete", "element", "inet", nftTable, "guest_allow", g.elements(tag))
 	}
-	if err := run(ctx, nil, "ip", "link", "show", "dev", g.Tap); err != nil {
+	if !linkExists(ctx, g.Tap) {
 		return nil
 	}
 	return run(ctx, nil, "ip", "link", "del", "dev", g.Tap)
@@ -149,10 +152,33 @@ func (g guestNet) elements(tag string) string {
 	return "{ " + strings.Join(parts, ", ") + " }"
 }
 
-// run executes a host network tool with a fixed environment and no shell.
-func run(ctx context.Context, stdin []byte, name string, args ...string) error {
+// netAdminCaps is the ambient capability set of a network tool that
+// changes links, addresses, or nftables, or that reads nftables. vmcp runs
+// as a non-root user, so a child gets a capability only in its ambient set.
+var netAdminCaps = []uintptr{unix.CAP_NET_ADMIN}
+
+// toolCommand returns a host tool command with a fixed environment, no
+// shell, and the ambient capabilities caps. A nil caps gives the tool no
+// capability.
+func toolCommand(ctx context.Context, caps []uintptr, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = []string{toolPath, "LC_ALL=C"}
+	if len(caps) > 0 {
+		cmd.SysProcAttr = &syscall.SysProcAttr{AmbientCaps: caps}
+	}
+	return cmd
+}
+
+// linkExists reports whether the link exists in the vmcp network
+// namespace. Reading links needs no capability.
+func linkExists(ctx context.Context, name string) bool {
+	return toolCommand(ctx, nil, "ip", "link", "show", "dev", name).Run() == nil
+}
+
+// run executes a network tool that changes host network state or reads
+// nftables. It has CAP_NET_ADMIN and no other capability.
+func run(ctx context.Context, stdin []byte, name string, args ...string) error {
+	cmd := toolCommand(ctx, netAdminCaps, name, args...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -173,9 +199,7 @@ func firstLine(b []byte) string {
 
 // ownedTaps lists the taps whose alias carries this install tag.
 func ownedTaps(ctx context.Context, installID string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "ip", "-o", "link", "show")
-	cmd.Env = []string{toolPath, "LC_ALL=C"}
-	out, err := cmd.Output()
+	out, err := toolCommand(ctx, nil, "ip", "-o", "link", "show").Output()
 	if err != nil {
 		return nil, fmt.Errorf("list links: %w", err)
 	}

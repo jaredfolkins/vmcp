@@ -316,6 +316,7 @@ func MakeExt4(ctx context.Context, dir, img string, size int64, label string) er
 	args = append(args, img)
 	cmd := exec.CommandContext(ctx, "mke2fs", args...)
 	cmd.Env = []string{"LC_ALL=C", "TZ=UTC", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
+	cmd.SysProcAttr = mke2fsAttr()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("mke2fs: %w: %s", err, firstLine(out))
 	}
