@@ -804,6 +804,11 @@ keeps that true.
 
 ## Release, Versions, And Git
 - Releases use `YYYYMMDDvN`. Never reuse a version for different bytes.
+- `scripts/release-image.sh <YYYYMMDDvN> <commit>` builds the image of one
+  pushed commit from the public repository with that version and commit,
+  and publishes it to `ghcr.io/jaredfolkins/vmcp` under the version and
+  `sha-<commit>` tags. It refuses a version that is already published.
+  Callers pin the printed digest.
 - Callers pin this module and the vmcp image by exact commit and digest.
   Do not commit a `replace` directive. Use an uncommitted `go.work` for
   local work with a caller.
