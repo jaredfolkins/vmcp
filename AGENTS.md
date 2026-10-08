@@ -119,6 +119,22 @@
     and `inet vmcp-old-live-gate`) with the other planted older resources,
     and reported the untagged table `inet vmcp-lookalike`, which it did
     not touch. Two installs in a row and a teardown left nothing tagged.
+- Live evidence of the detection of an older service and of the posture
+  mount check on 2026-10-08, commit `cd4a7c0`, on the same host:
+  - Release `20261008v2`, which takes no lock, ran as the service of
+    `live-gate`. `vmcp host status` reported `service_running: true` and
+    `PID <n> (vmcp) watches /sys/fs/cgroup/vmcp-live-gate`. `teardown` and
+    `install` exited with status 1, logged `host_service_running` with the
+    PID, and removed and wrote nothing. After the service stopped, status
+    reported `service_running: false`.
+  - Without `--pid=host`, and without SYS_PTRACE, `check`, `status`, and
+    `teardown` exited with status 1 and named the missing setting.
+  - The live gate subtest `posture-mount` passed: the mount check found no
+    violation for a jailed Firecracker (UID 400000, own mount namespace)
+    and a violation for a process in the vmcp mount namespace.
+  - The other steps of the gate passed again, with zero
+    `apparmor="DENIED"` lines for `vmcp-live-gate` and no suppressed audit
+    line.
 - The enforcer runs in vmcp. The live gate proves that it removes a stray
   `vmcp-` tap, restores a flushed `vmcp` table, and kills a machine whose
   jail gains a setuid file or whose cgroup gains a foreign process.
@@ -140,11 +156,11 @@ commit `5b4b833`. Steps 1, 2, 4, 5, and 6 ran again with commit
 
    ```bash
    docker build -t vmcp:dev .
-   docker run --rm --user 0:0 --cgroupns=host --network host \
+   docker run --rm --user 0:0 --cgroupns=host --network host --pid=host \
      --cap-drop ALL \
      --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID \
      --cap-add MAC_ADMIN --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE \
-     --cap-add SYS_ADMIN --cap-add SYS_MODULE \
+     --cap-add SYS_ADMIN --cap-add SYS_MODULE --cap-add SYS_PTRACE \
      --security-opt apparmor=unconfined \
      -v /etc:/host/etc -v /lib/modules:/lib/modules:ro \
      -v /sys/fs/cgroup:/sys/fs/cgroup \
@@ -155,13 +171,18 @@ commit `5b4b833`. Steps 1, 2, 4, 5, and 6 ran again with commit
    The host commands do not need `--privileged`. They need these
    capabilities: MAC_ADMIN loads AppArmor profiles, SYS_MODULE loads kernel
    modules, SYS_ADMIN writes cgroups and `trusted.*` attributes, NET_ADMIN
-   removes host links, and the rest are the file capabilities of the vmcp
-   binary, which must be in the bounding set. `apparmor=unconfined` is
+   removes host links and tables, SYS_PTRACE reads the file descriptors of
+   host processes to find a running vmcp service, and the rest are the file
+   capabilities of the vmcp binary, which must be in the bounding set.
+   `--pid=host` shows the host processes. Without it or without
+   SYS_PTRACE, `check` fails with `host-processes`, and `install`,
+   `teardown`, and `status` refuse. `apparmor=unconfined` is
    required, because Docker's default profile refuses profile loads; the host
    check then fails with `apparmor`. Docker's default seccomp profile allows
    module loads when SYS_MODULE is granted. `install`, `status`, and
    `teardown` passed with these settings on 2026-10-08 with release
-   `20261008v1`.
+   `20261008v1`, and with `--pid=host` and SYS_PTRACE with commit
+   `cd4a7c0`.
 
 2. Run vmcp with these options. Add the state volume, the credential, and
    the network of the deployment:
@@ -593,8 +614,9 @@ VERIFIED (see [Current State](#current-state)).
   strictly. An unknown command, flag, or argument fails before any host
   access.
   - `check` verifies root, the host `/etc` mount, cgroup v2 with `cpu`,
-    `memory`, and `pids` on at the root, AppArmor, and CPU virtualization.
-    It makes no change.
+    `memory`, and `pids` on at the root, AppArmor, the host processes
+    (`--pid=host` and SYS_PTRACE), and CPU virtualization. It makes no
+    change.
   - `install` runs `check`, then `teardown`, then writes
     `/etc/vmcp/<id>/seccomp.json`, writes `/etc/apparmor.d/vmcp-<id>` and
     loads it with `apparmor_parser -r -W` in enforce mode, creates the
@@ -613,10 +635,13 @@ VERIFIED (see [Current State](#current-state)).
     has one of its names.
   - `teardown` removes every resource with the install tag. First it
     takes the lock of each owned cgroup. `vmcp serve` holds the `flock` of
-    its parent cgroup while it runs, so while the service runs, teardown
-    refuses, changes nothing, and reports `service_running: true`.
-    Otherwise it holds the locks until it ends, so that the service cannot
-    start meanwhile. It kills the processes of owned cgroups with
+    its parent cgroup while it runs. Every vmcp version with the enforcer,
+    also one without the lock, watches its parent cgroup with inotify, and
+    teardown reads the inotify watches of all host processes from
+    `/proc/<pid>/fdinfo`. While a process holds the lock or watches an
+    owned cgroup, teardown refuses, changes nothing, and reports
+    `service_running: true` and `service_processes`. Otherwise it holds the
+    locks until it ends, so that the service cannot start meanwhile. It kills the processes of owned cgroups with
     `cgroup.kill`, waits, and reports them in `killed_processes`. It
     removes cgroups children first, unloads and removes profile files,
     and removes module files, tmpfiles files, configuration directories,
@@ -627,20 +652,21 @@ VERIFIED (see [Current State](#current-state)).
     `conflicts` and `other_installs`. Then it verifies from a fresh
     inventory that nothing tagged is left.
   - `status` prints the tagged inventory, the conflicts, the other
-    installs, `service_running`, and the receipt.
+    installs, `service_running`, `service_processes`, and the receipt.
 - Run them as root from the vmcp image in a one-shot container with the
   settings below. `--host-root` (default `/host`) holds the host `/etc`.
   The host network namespace lets teardown find host links and nftables
-  tables, `/sys/kernel/security` lets
+  tables, the host PID namespace lets it find a running service,
+  `/sys/kernel/security` lets
   `apparmor_parser` load profiles, and `/lib/modules` lets `modprobe` load
   modules:
 
   ```bash
-  docker run --rm --user 0:0 --cgroupns=host --network host \
+  docker run --rm --user 0:0 --cgroupns=host --network host --pid=host \
     --cap-drop ALL \
     --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID \
     --cap-add MAC_ADMIN --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE \
-    --cap-add SYS_ADMIN --cap-add SYS_MODULE \
+    --cap-add SYS_ADMIN --cap-add SYS_MODULE --cap-add SYS_PTRACE \
     --security-opt apparmor=unconfined \
     -v /etc:/host/etc -v /lib/modules:/lib/modules:ro \
     -v /sys/fs/cgroup:/sys/fs/cgroup \
@@ -649,9 +675,7 @@ VERIFIED (see [Current State](#current-state)).
   ```
 
 - Stop the vmcp service of the install before `install` or `teardown`.
-  They refuse while it runs. A vmcp version without the lock is not
-  detected; teardown then kills each process that it finds in an owned
-  cgroup.
+  They refuse while it runs, by its lock or by its inotify watch.
 - The log has one JSON line per step on stderr with `install_op` and
   `install_id`. Spans: `host.<command>`, `host.check`, `host.inventory`,
   `host.teardown`, `host.write.config`, `host.write.apparmor`,

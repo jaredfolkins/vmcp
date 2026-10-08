@@ -38,7 +38,9 @@ that every item follows.
    tagged resources with untagged look-alikes left untouched, and nothing
    tagged left. Since commit `10d693d`, install and teardown refuse while
    the vmcp service of the install runs, and teardown removes tagged
-   nftables tables of the host network namespace. Open: the service
+   nftables tables of the host network namespace. Since commit `cd4a7c0`,
+   they also find an older service without the lock by its inotify watch,
+   and need `--pid=host` and SYS_PTRACE. Open: the service
    transaction (lock, quiesce, journal,
    service stop and start, verification with machines, rollback, purge,
    and preserved state), the OS folder entry points, and the live gate on

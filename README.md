@@ -64,11 +64,11 @@ docker build -t vmcp:dev .
 # Install the host resources of install "dev": the AppArmor profile
 # vmcp-dev, /etc/vmcp/dev/seccomp.json, the parent cgroup vmcp-dev, the
 # KVM and TUN modules, and the files that bring them back at host boot.
-docker run --rm --user 0:0 --cgroupns=host --network host \
+docker run --rm --user 0:0 --cgroupns=host --network host --pid=host \
   --cap-drop ALL \
   --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID \
   --cap-add MAC_ADMIN --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE \
-  --cap-add SYS_ADMIN --cap-add SYS_MODULE \
+  --cap-add SYS_ADMIN --cap-add SYS_MODULE --cap-add SYS_PTRACE \
   --security-opt apparmor=unconfined \
   -v /etc:/host/etc -v /lib/modules:/lib/modules:ro \
   -v /sys/fs/cgroup:/sys/fs/cgroup \
@@ -116,11 +116,11 @@ To remove it:
 
 ```bash
 docker rm -f vmcp && docker volume rm vmcp-state
-docker run --rm --user 0:0 --cgroupns=host --network host \
+docker run --rm --user 0:0 --cgroupns=host --network host --pid=host \
   --cap-drop ALL \
   --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID \
   --cap-add MAC_ADMIN --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE \
-  --cap-add SYS_ADMIN --cap-add SYS_MODULE \
+  --cap-add SYS_ADMIN --cap-add SYS_MODULE --cap-add SYS_PTRACE \
   --security-opt apparmor=unconfined \
   -v /etc:/host/etc -v /lib/modules:/lib/modules:ro \
   -v /sys/fs/cgroup:/sys/fs/cgroup \
@@ -137,7 +137,7 @@ JSON result.
 
 | Command | What it does |
 | --- | --- |
-| `check` | Checks root, the host `/etc` mount, cgroup v2, AppArmor, and CPU virtualization. No change. |
+| `check` | Checks root, the host `/etc` mount, cgroup v2, AppArmor, the host processes, and CPU virtualization. No change. |
 | `install` | Runs `check` and `teardown`, then writes the seccomp profile, the AppArmor profile `vmcp-<id>` (loaded in enforce mode), the parent cgroup `vmcp-<id>` delegated to UID `65532`, `/etc/tmpfiles.d/vmcp-<id>.conf`, which creates that cgroup again at each host boot, and the KVM and TUN module file. It verifies them and writes `/etc/vmcp/<id>/receipt.json` last. |
 | `teardown` | Removes every host resource with the tag of the install, also from older vmcp versions. Refuses while the vmcp service of the install runs. |
 | `status` | Prints the tagged inventory, whether the service runs, and the receipt. |
@@ -149,8 +149,11 @@ the profile name `vmcp-<id>`, the alias `vmcp:<id>:...` of host links, and
 the comment `vmcp:<id>` of the vmcp nftables table. Teardown finds
 resources by these tags and removes only them. It reports an untagged
 look-alike or a resource of another install and does not touch it.
-`vmcp serve` holds a lock on its parent cgroup while it runs. `install` and
-`teardown` refuse while it is held, so stop the vmcp service first.
+`vmcp serve` holds a lock on its parent cgroup while it runs, and every
+vmcp version watches that cgroup. `install` and `teardown` refuse while a
+process holds the lock or the watch, so stop the vmcp service first. They
+need `--pid=host` and `SYS_PTRACE` to see the host processes, and refuse
+without them.
 
 A host reboot empties the cgroup file system. The install brings itself
 back before Docker starts the service: AppArmor loads the profile,
