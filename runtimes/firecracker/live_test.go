@@ -281,6 +281,36 @@ func TestLiveFirecracker(t *testing.T) {
 		}
 	})
 
+	t.Run("posture-mount", func(t *testing.T) {
+		// The mount namespace check of the posture contract, on real
+		// processes: a jailed Firecracker has its own mount namespace, and
+		// a process in the vmcp mount namespace is a violation.
+		m, _ := startLive(t, ctx, rt, "m-aaaa000000000003", 4, "sleep 60")
+		self, err := os.ReadFile("/proc/self/mountinfo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		pids, err := cgroupPIDs(m.cgroup)
+		if err != nil || len(pids) != 1 {
+			t.Fatalf("machine cgroup processes = %v, %v; want one Firecracker process", pids, err)
+		}
+		if v := mountViolation(pids[0], self); v != "" {
+			t.Errorf("jailed Firecracker PID %d: mountViolation() = %q, want none", pids[0], v)
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		shared := exec.Command(exe, "-test.run=^TestLiveIntruder$", "-vmcp-live-intruder")
+		if err := shared.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = shared.Process.Kill(); _ = shared.Wait() }()
+		if v := mountViolation(shared.Process.Pid, self); !strings.Contains(v, "shares the vmcp mount namespace") {
+			t.Errorf("process in the vmcp mount namespace: mountViolation() = %q, want a shared namespace", v)
+		}
+	})
+
 	t.Run("network", func(t *testing.T) {
 		script := strings.Join([]string{
 			fmt.Sprintf("wget -q -T 10 -O /dev/null %s && echo EGRESS_OK", c.EgressURL),
