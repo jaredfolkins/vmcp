@@ -89,16 +89,32 @@ Use exactly these settings. Each command below ran on 2026-10-08 with
 commit `5b4b833`.
 
 1. Build the image and install the host resources of the install, as root
-   in a one-shot privileged container:
+   in a one-shot container with the host-command settings:
 
    ```bash
    docker build -t vmcp:dev .
-   docker run --rm --user 0:0 --privileged --cgroupns=host --network host \
+   docker run --rm --user 0:0 --cgroupns=host --network host \
+     --cap-drop ALL \
+     --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID \
+     --cap-add MAC_ADMIN --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE \
+     --cap-add SYS_ADMIN --cap-add SYS_MODULE \
+     --security-opt apparmor=unconfined \
      -v /etc:/host/etc -v /lib/modules:/lib/modules:ro \
      -v /sys/fs/cgroup:/sys/fs/cgroup \
      -v /sys/kernel/security:/sys/kernel/security \
      vmcp:dev host install --install-id live-gate
    ```
+
+   The host commands do not need `--privileged`. They need these
+   capabilities: MAC_ADMIN loads AppArmor profiles, SYS_MODULE loads kernel
+   modules, SYS_ADMIN writes cgroups and `trusted.*` attributes, NET_ADMIN
+   removes host links, and the rest are the file capabilities of the vmcp
+   binary, which must be in the bounding set. `apparmor=unconfined` is
+   required, because Docker's default profile refuses profile loads; the host
+   check then fails with `apparmor`. Docker's default seccomp profile allows
+   module loads when SYS_MODULE is granted. `install`, `status`, and
+   `teardown` passed with these settings on 2026-10-08 with release
+   `20261008v1`.
 
 2. Run vmcp with these options. Add the state volume, the credential, and
    the network of the deployment:
@@ -520,14 +536,19 @@ every other service on the host are not vmcp-owned.
     verifies from a fresh inventory that nothing tagged is left.
   - `status` prints the tagged inventory, the conflicts, the other
     installs, and the receipt.
-- Run them as root from the vmcp image in a one-shot privileged container.
-  `--host-root` (default `/host`) holds the host `/etc`. The host network
+- Run them as root from the vmcp image in a one-shot container with the
+  settings below. `--host-root` (default `/host`) holds the host `/etc`. The host network
   namespace lets teardown find host links, `/sys/kernel/security` lets
   `apparmor_parser` load profiles, and `/lib/modules` lets `modprobe` load
   modules:
 
   ```bash
-  docker run --rm --user 0:0 --privileged --cgroupns=host --network host \
+  docker run --rm --user 0:0 --cgroupns=host --network host \
+    --cap-drop ALL \
+    --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID \
+    --cap-add MAC_ADMIN --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE \
+    --cap-add SYS_ADMIN --cap-add SYS_MODULE \
+    --security-opt apparmor=unconfined \
     -v /etc:/host/etc -v /lib/modules:/lib/modules:ro \
     -v /sys/fs/cgroup:/sys/fs/cgroup \
     -v /sys/kernel/security:/sys/kernel/security \

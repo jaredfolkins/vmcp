@@ -64,7 +64,12 @@ docker build -t vmcp:dev .
 # Install the host resources of install "dev": the AppArmor profile
 # vmcp-dev, /etc/vmcp/dev/seccomp.json, the parent cgroup vmcp-dev, and
 # the KVM and TUN modules.
-docker run --rm --user 0:0 --privileged --cgroupns=host --network host \
+docker run --rm --user 0:0 --cgroupns=host --network host \
+  --cap-drop ALL \
+  --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID \
+  --cap-add MAC_ADMIN --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE \
+  --cap-add SYS_ADMIN --cap-add SYS_MODULE \
+  --security-opt apparmor=unconfined \
   -v /etc:/host/etc -v /lib/modules:/lib/modules:ro \
   -v /sys/fs/cgroup:/sys/fs/cgroup \
   -v /sys/kernel/security:/sys/kernel/security \
@@ -111,7 +116,12 @@ To remove it:
 
 ```bash
 docker rm -f vmcp && docker volume rm vmcp-state
-docker run --rm --user 0:0 --privileged --cgroupns=host --network host \
+docker run --rm --user 0:0 --cgroupns=host --network host \
+  --cap-drop ALL \
+  --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID \
+  --cap-add MAC_ADMIN --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE \
+  --cap-add SYS_ADMIN --cap-add SYS_MODULE \
+  --security-opt apparmor=unconfined \
   -v /etc:/host/etc -v /lib/modules:/lib/modules:ro \
   -v /sys/fs/cgroup:/sys/fs/cgroup \
   -v /sys/kernel/security:/sys/kernel/security \
@@ -122,7 +132,7 @@ docker run --rm --user 0:0 --privileged --cgroupns=host --network host \
 
 `vmcp host check|install|teardown|status --install-id <id>` manage the host
 resources of one install. They run as root from the vmcp image in a
-one-shot privileged container with the flags above, and each prints one
+one-shot container with the flags above, and each prints one
 JSON result.
 
 | Command | What it does |
