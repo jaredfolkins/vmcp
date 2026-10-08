@@ -119,7 +119,7 @@ func startBrokers(n api.Network, host netip.Addr, cfg brokerConfig) (*brokers, e
 			go func() { _ = srv.Serve(ln) }()
 		}
 		for i, u := range n.Upstreams {
-			h, err := upstreamHandler(u, cfg.Log, cfg.TraceCtx)
+			h, err := upstreamHandler(u, b.upstreams[u.Name], cfg.Log, cfg.TraceCtx)
 			if err != nil {
 				return err
 			}
@@ -392,6 +392,26 @@ func (e *egress) dial(ctx context.Context, hostport string) (net.Conn, error) {
 	return c, nil
 }
 
+// rewriteLocation maps an absolute Location on the target origin to the
+// guest-facing base. Any other Location is returned unchanged.
+func rewriteLocation(loc string, target *url.URL, guestBase string) string {
+	l, err := url.Parse(loc)
+	if err != nil || !l.IsAbs() || !strings.EqualFold(l.Scheme, target.Scheme) || !strings.EqualFold(l.Host, target.Host) || guestBase == "" {
+		return loc
+	}
+	base, err := url.Parse(guestBase)
+	if err != nil {
+		return loc
+	}
+	l.Scheme, l.Host = base.Scheme, base.Host
+	// The target URL may carry a path prefix that the guest base omits.
+	if prefix := strings.TrimSuffix(target.Path, "/"); prefix != "" && strings.HasPrefix(l.Path, prefix+"/") {
+		l.Path = strings.TrimPrefix(l.Path, prefix)
+		l.RawPath = ""
+	}
+	return l.String()
+}
+
 // logHost returns a guest-supplied host name or port for a log line. A
 // value that is not a plain DNS name, address, or port is replaced, so that
 // guest text never reaches the log.
@@ -512,7 +532,11 @@ func closeWrite(c net.Conn) {
 // It logs a refused request at INFO, a failed one at WARN, and each
 // response status at DEBUG. It never logs the token, the path, or the
 // query.
-func upstreamHandler(u api.Upstream, log *slog.Logger, logCtx context.Context) (http.Handler, error) {
+//
+// A response Location that names the upstream's own origin is rewritten to
+// guestBase, the address the guest uses, so that a redirect such as a
+// registry upload session stays on the broker.
+func upstreamHandler(u api.Upstream, guestBase string, log *slog.Logger, logCtx context.Context) (http.Handler, error) {
 	target, err := url.Parse(u.URL)
 	if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" {
 		return nil, fmt.Errorf("upstream %q URL is invalid", u.Name)
@@ -530,6 +554,9 @@ func upstreamHandler(u api.Upstream, log *slog.Logger, logCtx context.Context) (
 			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			if loc := resp.Header.Get("Location"); loc != "" {
+				resp.Header.Set("Location", rewriteLocation(loc, target, guestBase))
+			}
 			log.DebugContext(logCtx, "upstream request", "upstream", u.Name, "method", resp.Request.Method, "status", resp.StatusCode)
 			return nil
 		},

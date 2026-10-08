@@ -1,0 +1,12 @@
+{
+  // Upstream Location headers and what the guest must see. The upstream
+  // target is http://web:5362 and the guest-facing base is
+  // http://100.80.0.1:8100.
+  "target": "http://web:5362",
+  "guest_base": "http://100.80.0.1:8100",
+  "cases": [
+    {"name": "registry upload session", "location": "http://web:5362/v2/acct/repo/blobs/uploads/abc?state=x", "want": "http://100.80.0.1:8100/v2/acct/repo/blobs/uploads/abc?state=x"},
+    {"name": "relative location", "location": "/v2/acct/repo/blobs/uploads/abc", "want": "/v2/acct/repo/blobs/uploads/abc"},
+    {"name": "other origin stays", "location": "https://storage.example.com/blob?sig=1", "want": "https://storage.example.com/blob?sig=1"},
+  ],
+}

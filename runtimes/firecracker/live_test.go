@@ -156,7 +156,7 @@ func TestLiveFirecracker(t *testing.T) {
 		spec := api.MachineSpec{
 			Process: api.Process{
 				Args: []string{"/bin/sh", "-c", fmt.Sprintf(
-					`[ "$VMCP_LIVE_SECRET" = "$(cat %s)" ] && echo SECRET_MATCH; grep -q ' /run tmpfs ' /proc/mounts && echo RUN_TMPFS; grep -c . %s`,
+					`[ "$VMCP_LIVE_SECRET" = "$(cat %s)" ] && echo SECRET_MATCH; grep -q ' /run tmpfs ' /proc/mounts && echo RUN_TMPFS; grep -q ' /sys/fs/cgroup cgroup2 ' /proc/mounts && echo CGROUP2; grep -c . %s`,
 					c.SecretFilePath, c.SecretFilePath)},
 				SecretEnv: []string{"VMCP_LIVE_SECRET=" + c.SecretValue},
 			},
@@ -184,7 +184,7 @@ func TestLiveFirecracker(t *testing.T) {
 
 		rec, res, _ := runLive(t, ctx, rt, "m-66778899aabbccdd", 2, spec, "")
 		out := rec.output(api.EventStdout)
-		for _, want := range []string{"SECRET_MATCH", "RUN_TMPFS"} {
+		for _, want := range []string{"SECRET_MATCH", "RUN_TMPFS", "CGROUP2"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("secrets output missing %s; got %q", want, out)
 			}

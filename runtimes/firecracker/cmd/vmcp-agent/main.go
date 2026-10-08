@@ -154,6 +154,10 @@ func buildRoot(cfg agentproto.Config, secrets *agentproto.Secrets) error {
 			return err
 		}
 	}
+	// cgroup2 lets container tools, such as BuildKit, run inside the guest.
+	// It is the guest kernel's own hierarchy. A kernel without cgroup2 still
+	// runs ordinary machines, so a failure here is not fatal.
+	_ = mountAt("cgroup2", filepath.Join(mergedRoot, "sys/fs/cgroup"), "cgroup2", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, "")
 	for _, d := range cfg.Drives {
 		target, err := guestPath(d.GuestPath)
 		if err != nil {
