@@ -188,7 +188,35 @@ func (m *Manager) load(ctx context.Context) (int, error) {
 		m.machines[rec.Machine.ID] = en
 		m.names[rec.Machine.Name] = rec.Machine.ID
 	}
+	for _, img := range m.images {
+		if img.Compatibility != m.rt.ImageCompatibility() {
+			_ = m.dropStaleImageLocked(ctx, img)
+		}
+	}
 	return failed, nil
+}
+
+// dropStaleImageLocked removes an image whose compatibility key differs
+// from the runtime key, so that the next request prepares it again. It
+// keeps an image that a live machine uses. The caller holds m.mu or runs
+// before the manager serves.
+func (m *Manager) dropStaleImageLocked(ctx context.Context, img *api.Image) error {
+	for _, en := range m.machines {
+		if en.rec.Machine.Image == img.ID && !terminal(en.rec.Machine.State) {
+			return errorf(api.ErrConflict, "image %s was prepared for another guest agent and is used by machine %s",
+				img.ID, en.rec.Machine.ID)
+		}
+	}
+	if err := m.rt.DeleteImage(img.ID); err != nil {
+		m.log.WarnContext(ctx, "stale image delete failed", "code", "image_delete_failed", "image", img.ID,
+			"error", trace.BoundedError(err))
+		return err
+	}
+	_ = os.Remove(filepath.Join(m.imageRecordsDir(), img.ID+".json"))
+	delete(m.images, img.ID)
+	m.log.InfoContext(ctx, "image dropped", "image", img.ID, "ref", img.Ref, "reason", "compatibility_changed",
+		"compatibility", img.Compatibility, "runtime_compatibility", m.rt.ImageCompatibility())
+	return nil
 }
 
 // Status reports the runtime status and the machine count.
@@ -207,7 +235,8 @@ func (m *Manager) Status() api.Status {
 }
 
 // CreateImage prepares an image. A repeated request for the same reference
-// returns the existing image.
+// returns the existing image, unless the image was prepared for another
+// guest agent: then it prepares the image again.
 func (m *Manager) CreateImage(ctx context.Context, req api.ImageRequest) (api.Image, error) {
 	if !strings.Contains(req.Ref, "@sha256:") {
 		return api.Image{}, errorf(api.ErrInvalidRequest, "image ref must be pinned by a sha256 digest")
@@ -226,9 +255,15 @@ func (m *Manager) CreateImage(ctx context.Context, req api.ImageRequest) (api.Im
 	log := m.log.With("image", id)
 	m.mu.Lock()
 	if img := m.images[id]; img != nil {
-		m.mu.Unlock()
-		log.DebugContext(ctx, "image reused", "image_digest", img.ImageDigest)
-		return *img, nil
+		if img.Compatibility == m.rt.ImageCompatibility() {
+			m.mu.Unlock()
+			log.DebugContext(ctx, "image reused", "image_digest", img.ImageDigest)
+			return *img, nil
+		}
+		if err := m.dropStaleImageLocked(ctx, img); err != nil {
+			m.mu.Unlock()
+			return api.Image{}, err
+		}
 	}
 	m.mu.Unlock()
 	ctx, span := trace.Start(ctx, log, "image.prepare")
@@ -317,9 +352,12 @@ func (m *Manager) CreateMachine(ctx context.Context, spec api.MachineSpec) (api.
 		}
 		return m.Machine(id)
 	}
-	if m.images[spec.Image] == nil {
+	if img := m.images[spec.Image]; img == nil {
 		m.mu.Unlock()
 		return api.Machine{}, errorf(api.ErrInvalidRequest, "image %q not found", spec.Image)
+	} else if img.Compatibility != m.rt.ImageCompatibility() {
+		m.mu.Unlock()
+		return api.Machine{}, errorf(api.ErrConflict, "image %q was prepared for another guest agent; create the image again", spec.Image)
 	}
 	slot := -1
 	for i := range m.cfg.MaxMachines {
@@ -969,6 +1007,14 @@ func (s *sink) Event(ev api.Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if ev.Kind != api.EventStdout && ev.Kind != api.EventStderr {
+		if ev.Detail != "" {
+			detail, _ := redactStream([]byte(ev.Detail), s.redactions)
+			ev.Detail = string(detail)
+			if ev.Kind == api.EventStep && ev.Status == "failed" {
+				s.en.log.WarnContext(s.en.traceCtx, "guest step failed", "code", "guest_step_failed",
+					"step", ev.Step, "detail", ev.Detail)
+			}
+		}
 		_ = s.en.events.append(ev)
 		return
 	}

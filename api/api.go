@@ -233,11 +233,14 @@ const (
 // Event is one ordered machine event. Seq increases by one per event.
 // Data is bounded and redacted.
 type Event struct {
-	Seq    uint64       `json:"seq"`
-	Time   time.Time    `json:"time"`
-	Kind   EventKind    `json:"kind"`
-	Step   string       `json:"step,omitempty"`
-	Status string       `json:"status,omitempty"`
+	Seq    uint64    `json:"seq"`
+	Time   time.Time `json:"time"`
+	Kind   EventKind `json:"kind"`
+	Step   string    `json:"step,omitempty"`
+	Status string    `json:"status,omitempty"`
+	// Detail is the guest agent's reason for a failed step, at most 512
+	// bytes, with the machine redactions applied.
+	Detail string       `json:"detail,omitempty"`
 	State  MachineState `json:"state,omitempty"`
 	Data   []byte       `json:"data,omitempty"`
 	Exit   *Exit        `json:"exit,omitempty"`

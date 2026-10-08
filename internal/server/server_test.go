@@ -25,23 +25,51 @@ const testCredential = "test-credential-0123456789abcdef0123456789"
 
 // fakeRuntime runs scripted machines. The guest "program" is the first
 // spec arg: "echo:<text>" prints and exits 0, "exit:<n>" exits n, "hang"
-// runs until killed, "copy" copies drive "in" file "f" to drive "out".
+// runs until killed, "copy" copies drive "in" file "f" to drive "out", and
+// "stepfail:<detail>" reports a failed agent step and exits 127.
 type fakeRuntime struct {
 	mu        sync.Mutex
 	recovered int
+	// compat is the image compatibility key; empty means "fake".
+	compat   string
+	prepared int
+}
+
+func (f *fakeRuntime) ImageCompatibility() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.compat == "" {
+		return "fake"
+	}
+	return f.compat
+}
+
+func (f *fakeRuntime) setCompatibility(c string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.compat = c
+}
+
+func (f *fakeRuntime) preparedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.prepared
 }
 
 func (f *fakeRuntime) Status() api.Status { return api.Status{Runtime: "fake", Ready: true} }
 
 func (f *fakeRuntime) PrepareImage(_ context.Context, _ string, req api.ImageRequest) (machine.ImageInfo, error) {
-	return machine.ImageInfo{ImageDigest: req.Ref[strings.Index(req.Ref, "@")+1:], Compatibility: "fake", SizeBytes: 1,
+	f.mu.Lock()
+	f.prepared++
+	f.mu.Unlock()
+	return machine.ImageInfo{ImageDigest: req.Ref[strings.Index(req.Ref, "@")+1:], Compatibility: f.ImageCompatibility(), SizeBytes: 1,
 		Process: machine.ProcessConfig{Cmd: []string{"echo:from-image"}, Env: []string{"A=image", "B=image"}, User: "1000", WorkingDir: "/app"}}, nil
 }
 
 func (f *fakeRuntime) DeleteImage(string) error { return nil }
 
 func (f *fakeRuntime) PrepareSelfTestImage(context.Context, string) (machine.ImageInfo, error) {
-	return machine.ImageInfo{ImageDigest: "sha256:selftest", Process: machine.ProcessConfig{Cmd: []string{"echo:{\"metadata_denied\":true}"}}}, nil
+	return machine.ImageInfo{ImageDigest: "sha256:selftest", Compatibility: f.ImageCompatibility(), Process: machine.ProcessConfig{Cmd: []string{"echo:{\"metadata_denied\":true}"}}}, nil
 }
 
 func (f *fakeRuntime) Recover(context.Context) error {
@@ -85,6 +113,9 @@ func (i *fakeInstance) Boot(context.Context) error {
 			<-i.kill
 		case prog == "hang":
 			<-i.kill
+		case strings.HasPrefix(prog, "stepfail:"):
+			i.l.Sink.Event(api.Event{Kind: api.EventStep, Step: "agent", Status: "failed", Detail: strings.TrimPrefix(prog, "stepfail:")})
+			exit = &api.Exit{Code: 127, Reason: api.ExitCompleted}
 		case strings.HasPrefix(prog, "leak:"):
 			// Print every secret value in chunks of n bytes, so that each
 			// value is split across chunks.
@@ -145,8 +176,12 @@ type harness struct {
 
 func newHarness(t *testing.T, dir string) *harness {
 	t.Helper()
-	rt := &fakeRuntime{}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return newHarnessFor(t, dir, &fakeRuntime{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+// newHarnessFor starts a manager and server over dir with rt and log.
+func newHarnessFor(t *testing.T, dir string, rt *fakeRuntime, log *slog.Logger) *harness {
+	t.Helper()
 	mgr, err := machine.New(context.Background(), rt, machine.Config{Dir: dir, MaxMachines: 4, Logger: log})
 	if err != nil {
 		t.Fatal(err)

@@ -17,6 +17,10 @@ type Runtime interface {
 	// PrepareSelfTestImage builds the built-in image that runs the runtime
 	// self-test in a guest.
 	PrepareSelfTestImage(ctx context.Context, id string) (ImageInfo, error)
+	// ImageCompatibility is the compatibility key that a prepared image must
+	// have to boot. An image with another key was prepared for another guest
+	// agent or unpacker.
+	ImageCompatibility() string
 	DeleteImage(id string) error
 	// Provision builds an isolated machine without booting it.
 	Provision(ctx context.Context, l Launch) (Instance, error)

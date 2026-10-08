@@ -594,7 +594,8 @@ func (m *Machine) readEvents(c net.Conn) {
 			m.event(api.Event{Kind: api.EventStep, Step: "guest-agent", Status: "running"})
 			m.checkPosture()
 		case agentproto.TypeStep:
-			m.event(api.Event{Kind: api.EventStep, Step: bounded(msg.Step, 64), Status: bounded(msg.Status, 32)})
+			m.event(api.Event{Kind: api.EventStep, Step: bounded(msg.Step, 64), Status: bounded(msg.Status, 32),
+				Detail: bounded(msg.Detail, 512)})
 		case agentproto.TypeStdout:
 			m.event(api.Event{Kind: api.EventStdout, Data: msg.Data})
 		case agentproto.TypeStderr:

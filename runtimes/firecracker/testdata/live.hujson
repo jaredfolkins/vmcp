@@ -15,4 +15,7 @@
   // and its absence from the config drive on host disk.
   "secret_value": "live-gate-fake-secret-0123456789",
   "secret_file_path": "/run/vmcp-live/secret.txt",
+  // A process path that does not exist. The guest agent must report why
+  // the process did not start.
+  "missing_binary": "/nonexistent/vmcp-live-missing",
 }

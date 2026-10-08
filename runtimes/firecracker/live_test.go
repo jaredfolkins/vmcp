@@ -41,6 +41,7 @@ type liveCfg struct {
 	EgressURL      string   `json:"egress_url"`
 	SecretValue    string   `json:"secret_value"`
 	SecretFilePath string   `json:"secret_file_path"`
+	MissingBinary  string   `json:"missing_binary"`
 }
 
 func loadLiveCfg(t *testing.T) liveCfg {
@@ -126,6 +127,11 @@ func TestLiveFirecracker(t *testing.T) {
 		t.Fatalf("PrepareImage() error = %v", err)
 	}
 	t.Logf("image prepared in %s: %d bytes", time.Since(start).Round(time.Millisecond), meta.SizeBytes)
+	// The manager drops an image whose key differs from the runtime key, so
+	// a fresh image must carry exactly the runtime key.
+	if meta.Compatibility != rt.ImageCompatibility() {
+		t.Fatalf("image compatibility = %q, runtime compatibility = %q", meta.Compatibility, rt.ImageCompatibility())
+	}
 	t.Cleanup(func() { _ = rt.DeleteImage("img-live") })
 
 	t.Run("isolated", func(t *testing.T) {
@@ -188,6 +194,30 @@ func TestLiveFirecracker(t *testing.T) {
 			if !strings.Contains(out, want) {
 				t.Errorf("secrets output missing %s; got %q", want, out)
 			}
+		}
+		checkProof(t, rt, res)
+	})
+
+	t.Run("agent-failure", func(t *testing.T) {
+		if c.MissingBinary == "" {
+			t.Fatal("live config needs missing_binary")
+		}
+		rec, res, _ := runLive(t, ctx, rt, "m-1122334455667788", 3, api.MachineSpec{
+			Process: api.Process{Args: []string{c.MissingBinary}},
+		}, "")
+		if res.Exit == nil || res.Exit.Code != 127 {
+			t.Errorf("exit = %+v, want code 127", res.Exit)
+		}
+		var detail string
+		rec.mu.Lock()
+		for _, ev := range rec.events {
+			if ev.Kind == api.EventStep && ev.Status == "failed" {
+				detail = ev.Detail
+			}
+		}
+		rec.mu.Unlock()
+		if !strings.Contains(detail, c.MissingBinary) {
+			t.Errorf("failed step detail = %q, want the missing binary %q; events %s", detail, c.MissingBinary, rec.dump())
 		}
 		checkProof(t, rt, res)
 	})

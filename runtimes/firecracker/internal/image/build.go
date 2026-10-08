@@ -51,6 +51,16 @@ type Meta struct {
 	Process       Config `json:"process"`
 }
 
+// AgentCompatibility is the compatibility key of images prepared with the
+// agent at agentPath.
+func AgentCompatibility(agentPath string) (string, error) {
+	sum, err := fileSHA256(agentPath)
+	if err != nil {
+		return "", err
+	}
+	return Compatibility(sum), nil
+}
+
 // Compatibility identifies the inputs that shape a prepared image.
 func Compatibility(agentSHA256 string) string {
 	sum := sha256.Sum256([]byte(UnpackerVersion + "\n" + agentSHA256))

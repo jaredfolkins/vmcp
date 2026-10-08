@@ -1,0 +1,14 @@
+{
+  // One image reference. The fake runtime prepares it under each key.
+  "image_ref": "example/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  // The compatibility key changes when the guest agent changes: first while
+  // vmcp runs, then across a restart.
+  "first_compatibility": "fake-rootfs:agent-1",
+  "next_compatibility": "fake-rootfs:agent-2",
+  "restart_compatibility": "fake-rootfs:agent-3",
+  // The guest agent's reason for a failed step. It contains a redaction
+  // value, which must not reach the event or the log.
+  "redaction": "tok-0123456789abcdef",
+  "step_detail": "start process: exec /bin/app: no such file or directory (token tok-0123456789abcdef)",
+  "want_detail": "start process: exec /bin/app: no such file or directory (token [REDACTED])",
+}

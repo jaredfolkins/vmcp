@@ -62,6 +62,7 @@ type Runtime struct {
 	firecracker string
 	jailer      string
 	release     string
+	compat      string
 	enf         *enforcer
 }
 
@@ -100,6 +101,9 @@ func New(ctx context.Context, cfg Config) (*Runtime, error) {
 	}
 	if err := r.installKernel(); err != nil {
 		return nil, err
+	}
+	if r.compat, err = image.AgentCompatibility(cfg.AgentPath); err != nil {
+		return nil, fmt.Errorf("hash guest agent: %w", err)
 	}
 	if err := r.prepareCgroup(); err != nil {
 		return nil, err
@@ -223,6 +227,10 @@ func (r *Runtime) PrepareImage(ctx context.Context, id string, req api.ImageRequ
 		},
 	}, nil
 }
+
+// ImageCompatibility is the compatibility key of images prepared with the
+// installed guest agent.
+func (r *Runtime) ImageCompatibility() string { return r.compat }
 
 // PrepareSelfTestImage builds the built-in self-test image under id.
 func (r *Runtime) PrepareSelfTestImage(ctx context.Context, id string) (machine.ImageInfo, error) {

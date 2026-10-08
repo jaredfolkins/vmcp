@@ -195,6 +195,11 @@ each machine leaves a zombie Firecracker process.
   process left. Each one gets state `failed`, exit reason `failed`, and a
   proof.
 - Persistent machines follow their restart policy.
+- A prepared image records the compatibility key of the guest agent and
+  unpacker that built it. An image with another key never boots: vmcp
+  drops it at start, prepares it again on the next request for its
+  reference, and refuses a new machine for it. It keeps an image that a
+  live machine uses.
 - After a caller restart, the caller lists machines by label and
   reconciles them with its own records.
 
