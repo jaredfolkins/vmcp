@@ -1,0 +1,46 @@
+// Inputs for the KVM worker filter of machine cgroups. On Linux 6.1 KVM
+// adds a kernel thread "kvm-nx-lpage-recovery-<firecracker pid>" to the
+// machine cgroup; the enforcer must ignore exactly that thread.
+{
+  // /proc/<pid>/stat lines and their flags field.
+  "stat_cases": [
+    {"name": "kernel thread", "stat": "1299226 (kvm-nx-lpage-recovery-1299222) S 2 0 0 0 -1 2129984 0 0 0 0 0 0 0 0 20 0 1 0 108766180 0 0", "flags": 2129984},
+    {"name": "name with spaces and parentheses", "stat": "42 (a (b) c) S 1 42 42 0 -1 4194560 10 0 0 0 1 2 0 0 20 0 3 0 100 0 0", "flags": 4194560},
+    {"name": "no name field", "stat": "42 a S 1", "want_error": "no name field"},
+    {"name": "too short", "stat": "42 (x) S 1 2", "want_error": "too short"}
+  ],
+  // A machine cgroup: process PIDs, the identity of each, and the PIDs that
+  // stay after the filter.
+  "filter_cases": [
+    {
+      "name": "firecracker and its KVM worker",
+      "procs": [{"pid": 100, "comm": "firecracker"}, {"pid": 104, "kernel_thread": true, "comm": "kvm-nx-lpage-recovery-100"}],
+      "want": [100]
+    },
+    {
+      "name": "user process with the worker name",
+      "procs": [{"pid": 100, "comm": "firecracker"}, {"pid": 104, "comm": "kvm-nx-lpage-recovery-100"}],
+      "want": [100, 104]
+    },
+    {
+      "name": "worker of a process outside the cgroup",
+      "procs": [{"pid": 100, "comm": "firecracker"}, {"pid": 104, "kernel_thread": true, "comm": "kvm-nx-lpage-recovery-999"}],
+      "want": [100, 104]
+    },
+    {
+      "name": "truncated worker name",
+      "procs": [{"pid": 100, "comm": "firecracker"}, {"pid": 104, "kernel_thread": true, "comm": "kvm-nx-lpage-re"}],
+      "want": [100, 104]
+    },
+    {
+      "name": "worker that names itself",
+      "procs": [{"pid": 104, "kernel_thread": true, "comm": "kvm-nx-lpage-recovery-104"}],
+      "want": [104]
+    },
+    {
+      "name": "other kernel thread",
+      "procs": [{"pid": 100, "comm": "firecracker"}, {"pid": 105, "kernel_thread": true, "comm": "kworker/u8:1"}],
+      "want": [100, 105]
+    }
+  ]
+}

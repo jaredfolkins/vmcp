@@ -171,7 +171,7 @@ func (e *enforcer) sweepCgroups() {
 		if !m.postureChecked() {
 			continue
 		}
-		pids, err := cgroupPIDs(p)
+		pids, err := machinePIDs(p)
 		if err != nil || len(pids) == 0 {
 			// An empty cgroup means Firecracker exited: the machine is
 			// ending and its teardown owns the cgroup. It is not a breach.

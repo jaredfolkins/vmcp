@@ -91,6 +91,88 @@ func cgroupPIDs(path string) ([]int, error) {
 	return pids, nil
 }
 
+// pfKthread is PF_KTHREAD in the flags field of /proc/<pid>/stat. User
+// space cannot set it.
+const pfKthread = 0x00200000
+
+// kvmWorkerPrefix names the kernel thread that KVM creates for each VM on
+// Linux 6.1 to recover NX huge pages. KVM attaches the thread to the cgroup
+// of the VM owner, so it appears next to Firecracker in the machine cgroup.
+// Newer kernels run this work as a thread of the Firecracker process.
+const kvmWorkerPrefix = "kvm-nx-lpage-recovery-"
+
+// procIdentity is what machinePIDs reads to recognize the KVM worker.
+type procIdentity struct {
+	kernelThread bool
+	comm         string
+}
+
+// machinePIDs returns the processes of a machine cgroup without the KVM
+// worker thread of a process of the same cgroup.
+func machinePIDs(cgroup string) ([]int, error) {
+	pids, err := cgroupPIDs(cgroup)
+	if err != nil {
+		return nil, err
+	}
+	return dropKVMWorkers(pids, readProcIdentity), nil
+}
+
+// dropKVMWorkers removes each KVM worker of a process in pids. A process is
+// such a worker only when it is a kernel thread and its name is
+// kvmWorkerPrefix followed by the PID of another process in pids. Every
+// other process stays, so an unknown process is still a violation.
+func dropKVMWorkers(pids []int, identify func(int) (procIdentity, error)) []int {
+	in := make(map[int]bool, len(pids))
+	for _, p := range pids {
+		in[p] = true
+	}
+	out := make([]int, 0, len(pids))
+	for _, p := range pids {
+		if id, err := identify(p); err == nil && id.kernelThread {
+			if owner, ok := strings.CutPrefix(id.comm, kvmWorkerPrefix); ok {
+				if n, err := strconv.Atoi(owner); err == nil && n != p && in[n] {
+					continue
+				}
+			}
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// readProcIdentity reads the kernel-thread flag and the name of pid.
+func readProcIdentity(pid int) (procIdentity, error) {
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return procIdentity{}, err
+	}
+	flags, err := statFlags(string(stat))
+	if err != nil {
+		return procIdentity{}, err
+	}
+	comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return procIdentity{}, err
+	}
+	return procIdentity{kernelThread: flags&pfKthread != 0, comm: strings.TrimSuffix(string(comm), "\n")}, nil
+}
+
+// statFlags returns the flags field of a /proc/<pid>/stat line. The name
+// field can hold spaces and parentheses, so the fields after it start at
+// the last ')'.
+func statFlags(stat string) (uint64, error) {
+	i := strings.LastIndexByte(stat, ')')
+	if i < 0 {
+		return 0, errors.New("stat line has no name field")
+	}
+	// After the name: state, ppid, pgrp, session, tty_nr, tpgid, flags.
+	f := strings.Fields(stat[i+1:])
+	if len(f) < 7 {
+		return 0, errors.New("stat line is too short")
+	}
+	return strconv.ParseUint(f[6], 10, 64)
+}
+
 // threadStatus is the part of /proc/<pid>/task/<tid>/status that the
 // posture contract checks.
 type threadStatus struct {
@@ -138,7 +220,7 @@ func readThreadStatus(path string) (threadStatus, error) {
 // postureViolations checks every thread of every process in the cgroup
 // against the posture contract.
 func postureViolations(cgroup string, uid int) (threads int, violations []string, err error) {
-	pids, err := cgroupPIDs(cgroup)
+	pids, err := machinePIDs(cgroup)
 	if err != nil {
 		return 0, nil, err
 	}
