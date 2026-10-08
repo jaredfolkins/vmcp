@@ -34,7 +34,10 @@ type inventory struct {
 	links          []string
 	nftTables      []hostTable
 	// locked are the owned cgroups whose lock a vmcp process holds.
-	locked    []string
+	locked []string
+	// watchers are the host processes that watch an owned cgroup: a vmcp
+	// service of any version.
+	watchers  []cgroupWatcher
 	loaded    map[string]string
 	conflicts []HostResource
 	others    []HostResource
@@ -120,7 +123,7 @@ func (h *hostRun) inventory(ctx context.Context) (*inventory, error) {
 		span.End(err)
 		return nil, err
 	}
-	for _, scan := range []func(*inventory) error{h.scanCgroups, h.scanLocks, h.scanAppArmor, h.scanModules, h.scanTmpfiles, h.scanConfig, h.scanLinks, h.scanNftTables} {
+	for _, scan := range []func(*inventory) error{h.scanCgroups, h.scanService, h.scanAppArmor, h.scanModules, h.scanTmpfiles, h.scanConfig, h.scanLinks, h.scanNftTables} {
 		if err := scan(inv); err != nil {
 			span.End(err)
 			return nil, err
@@ -199,9 +202,26 @@ func (h *hostRun) scanCgroups(inv *inventory) error {
 	return nil
 }
 
-// scanLocks finds the owned cgroups whose lock a vmcp process holds. vmcp
-// serve holds the lock of its parent cgroup while it runs.
-func (h *hostRun) scanLocks(inv *inventory) error {
+// scanService finds a running vmcp service of the install. vmcp serve holds
+// the lock of its parent cgroup while it runs. Every vmcp version with the
+// enforcer also watches the parent cgroup with inotify, so a version
+// without the lock is found by its watch.
+func (h *hostRun) scanService(inv *inventory) error {
+	if len(inv.cgroups) == 0 {
+		return nil
+	}
+	if err := h.sys.hostProcesses(); err != nil {
+		return fmt.Errorf("cannot check for a running vmcp service: %w", err)
+	}
+	paths := make([]string, 0, len(inv.cgroups))
+	for _, c := range inv.cgroups {
+		paths = append(paths, c.full)
+	}
+	w, err := h.sys.cgroupWatchers(paths)
+	if err != nil {
+		return fmt.Errorf("cannot check for a running vmcp service: %w", err)
+	}
+	inv.watchers = w
 	for _, c := range inv.cgroups {
 		release, err := h.sys.lockCgroup(c.full)
 		switch {

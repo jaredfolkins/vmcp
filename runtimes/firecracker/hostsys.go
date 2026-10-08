@@ -9,9 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +45,13 @@ type hostSystem interface {
 	// runs. It returns errCgroupLocked when another process holds it. The
 	// returned function releases the lock.
 	lockCgroup(path string) (func(), error)
+	// hostProcesses returns an error unless the host command sees the
+	// processes of the host and can read their file descriptors.
+	hostProcesses() error
+	// cgroupWatchers returns the host processes that hold an inotify
+	// watch on one of the cgroups. Every vmcp version with the enforcer
+	// watches its parent cgroup while it runs, also one without the lock.
+	cgroupWatchers(paths []string) ([]cgroupWatcher, error)
 
 	// loadedProfiles returns the mode of each loaded AppArmor profile.
 	loadedProfiles() (map[string]string, error)
@@ -63,6 +72,13 @@ type hostSystem interface {
 	// with their comments.
 	nftTables() ([]hostTable, error)
 	deleteNftTable(family, name string) error
+}
+
+// cgroupWatcher is a process that watches a cgroup with inotify.
+type cgroupWatcher struct {
+	PID    int    `json:"pid"`
+	Comm   string `json:"comm"`
+	Cgroup string `json:"cgroup"`
 }
 
 // hostTable is an nftables table and its comment.
@@ -165,6 +181,133 @@ func (k kernelHost) lockCgroup(path string) (func(), error) {
 		return nil, err
 	}
 	return func() { _ = f.Close() }, nil
+}
+
+func (k kernelHost) hostProcesses() error {
+	self, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return fmt.Errorf("read the cgroup of the host command: %w", err)
+	}
+	init, err := os.ReadFile("/proc/1/cgroup")
+	if err != nil {
+		return fmt.Errorf("read the cgroup of PID 1: %w", err)
+	}
+	// Without the host PID namespace, PID 1 is the init process of this
+	// container, in the same cgroup.
+	if bytes.Equal(self, init) {
+		return errors.New("the host processes are not visible; run the host command with --pid=host")
+	}
+	status, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		if v, ok := strings.CutPrefix(line, "CapEff:"); ok {
+			eff, err := strconv.ParseUint(strings.TrimSpace(v), 16, 64)
+			if err != nil {
+				return fmt.Errorf("parse effective capabilities: %w", err)
+			}
+			if eff&(1<<unix.CAP_SYS_PTRACE) == 0 {
+				return errors.New("the host command cannot read the file descriptors of other users; add CAP_SYS_PTRACE")
+			}
+			return nil
+		}
+	}
+	return errors.New("process status has no effective capability set")
+}
+
+func (k kernelHost) cgroupWatchers(paths []string) ([]cgroupWatcher, error) {
+	want := map[inotifyWatch]string{}
+	for _, p := range paths {
+		var st unix.Stat_t
+		if err := unix.Stat(p, &st); err != nil {
+			if errors.Is(err, unix.ENOENT) {
+				continue
+			}
+			return nil, fmt.Errorf("inspect cgroup %s: %w", p, err)
+		}
+		// fdinfo prints the kernel device number: major<<20 | minor.
+		dev := uint64(unix.Major(st.Dev))<<20 | uint64(unix.Minor(st.Dev))
+		want[inotifyWatch{Ino: st.Ino, Dev: dev}] = p
+	}
+	if len(want) == 0 {
+		return nil, nil
+	}
+	procs, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+	self := os.Getpid()
+	var out []cgroupWatcher
+	for _, e := range procs {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid == self {
+			continue
+		}
+		fdDir := filepath.Join("/proc", e.Name(), "fd")
+		fds, err := os.ReadDir(fdDir)
+		switch {
+		case errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ESRCH):
+			continue // The process exited.
+		case errors.Is(err, fs.ErrPermission):
+			return nil, fmt.Errorf("read the file descriptors of PID %d: %w; add CAP_SYS_PTRACE", pid, err)
+		case err != nil:
+			continue
+		}
+		for _, fd := range fds {
+			if link, err := os.Readlink(filepath.Join(fdDir, fd.Name())); err != nil || link != "anon_inode:inotify" {
+				continue
+			}
+			info, err := os.ReadFile(filepath.Join("/proc", e.Name(), "fdinfo", fd.Name()))
+			if err != nil {
+				continue
+			}
+			for _, w := range parseInotify(info) {
+				if cg, ok := want[w]; ok {
+					comm, _ := os.ReadFile(filepath.Join("/proc", e.Name(), "comm"))
+					out = append(out, cgroupWatcher{PID: pid, Comm: strings.TrimSpace(string(comm)), Cgroup: cg})
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// inotifyWatch is the inode and kernel device number of one watch.
+type inotifyWatch struct {
+	Ino uint64 `json:"ino"`
+	Dev uint64 `json:"dev"`
+}
+
+// parseInotify reads the watches of an inotify file descriptor from its
+// fdinfo: lines "inotify wd:1 ino:1c7532 sdev:20 mask:...", in hex.
+func parseInotify(fdinfo []byte) []inotifyWatch {
+	var out []inotifyWatch
+	for _, line := range strings.Split(string(fdinfo), "\n") {
+		rest, ok := strings.CutPrefix(line, "inotify ")
+		if !ok {
+			continue
+		}
+		var w inotifyWatch
+		var ino, dev bool
+		for _, f := range strings.Fields(rest) {
+			k, v, _ := strings.Cut(f, ":")
+			n, err := strconv.ParseUint(v, 16, 64)
+			if err != nil {
+				continue
+			}
+			switch k {
+			case "ino":
+				w.Ino, ino = n, true
+			case "sdev":
+				w.Dev, dev = n, true
+			}
+		}
+		if ino && dev {
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 func (k kernelHost) loadedProfiles() (map[string]string, error) {

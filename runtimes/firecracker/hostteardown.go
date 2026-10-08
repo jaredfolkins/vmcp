@@ -153,6 +153,34 @@ func (h *hostRun) lockOwned(ctx context.Context, inv *inventory) (func(), error)
 		return nil, fmt.Errorf("the vmcp service of install %s runs: a process holds the lock of %s; stop the service first",
 			h.cfg.InstallID, strings.Join(busy, ", "))
 	}
+	// A vmcp version without the lock still watches its parent cgroup.
+	// Look again with the locks held, so that no new service starts.
+	paths := make([]string, 0, len(inv.cgroups))
+	for _, c := range inv.cgroups {
+		paths = append(paths, c.full)
+	}
+	var watchers []cgroupWatcher
+	if len(paths) > 0 {
+		var err error
+		if err = h.sys.hostProcesses(); err == nil {
+			watchers, err = h.sys.cgroupWatchers(paths)
+		}
+		if err != nil {
+			release()
+			return nil, fmt.Errorf("cannot check for a running vmcp service: %w", err)
+		}
+	}
+	if len(watchers) > 0 {
+		release()
+		h.res.ServiceRunning = true
+		h.res.ServiceProcesses = watcherList(watchers)
+		for _, w := range watchers {
+			h.log.WarnContext(ctx, "host vmcp service runs", "code", "host_service_running", "cgroup", w.Cgroup,
+				"pid", w.PID, "comm", w.Comm)
+		}
+		return nil, fmt.Errorf("the vmcp service of install %s runs: %s; stop the service first",
+			h.cfg.InstallID, strings.Join(h.res.ServiceProcesses, ", "))
+	}
 	return release, nil
 }
 

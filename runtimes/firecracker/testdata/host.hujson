@@ -120,6 +120,36 @@
     },
     "loaded_profiles": {"vmcp-live-gate": "enforce"},
   },
+  // An older vmcp version runs: it holds no lock, but its enforcer watches
+  // the parent cgroup with inotify. Install and teardown refuse.
+  "old_service": {
+    "cgroups": [{"path": "vmcp-live-gate", "owner": "live-gate"}],
+    "watchers": [{"pid": 4242, "comm": "vmcp", "cgroup": "vmcp-live-gate"}],
+    "files": {
+      "etc/apparmor.d/vmcp-live-gate": "# vmcp-owner: live-gate\nprofile vmcp-live-gate {}\n",
+      "etc/vmcp/live-gate/.vmcp-owner": "# vmcp-owner: live-gate\nseccomp.json\n",
+      "etc/vmcp/live-gate/seccomp.json": "{}\n",
+    },
+    "loaded_profiles": {"vmcp-live-gate": "enforce"},
+  },
+  // The host command cannot see the host processes, so it cannot prove
+  // that no service runs. Every command refuses.
+  "no_host_processes": {
+    "cgroups": [{"path": "vmcp-live-gate", "owner": "live-gate"}],
+    "no_host_processes": true,
+    "files": {"etc/apparmor.d/vmcp-live-gate": "# vmcp-owner: live-gate\nprofile vmcp-live-gate {}\n"},
+    "loaded_profiles": {"vmcp-live-gate": "enforce"},
+  },
+  // fdinfo of inotify file descriptors, as the kernel prints them. ino and
+  // sdev are hex; sdev is the kernel device number.
+  "inotify": [
+    {
+      "name": "two watches",
+      "fdinfo": "pos:\t0\nflags:\t02004000\nmnt_id:\t19\nino:\t77\ninotify wd:2 ino:1c7532 sdev:20 mask:b00 ignored_mask:0 fhandle-bytes:8 fhandle-type:fe f_handle:3275c70000000000\ninotify wd:1 ino:1 sdev:20 mask:300 ignored_mask:0 fhandle-bytes:8 fhandle-type:fe f_handle:0100000000000000\n",
+      "want": [{"ino": 1865010, "dev": 32}, {"ino": 1, "dev": 32}],
+    },
+    {"name": "no watch", "fdinfo": "pos:\t0\nflags:\t00\nmnt_id:\t19\nino:\t77\n", "want": null},
+  ],
   // A text ruleset as nft list ruleset prints it. Only the line with one
   // tab of indent in a table block is the table comment.
   "nft_ruleset": {

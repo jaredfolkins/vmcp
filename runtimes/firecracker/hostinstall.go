@@ -124,9 +124,12 @@ type HostResult struct {
 	// Installed is true when every resource of a complete install exists.
 	Installed bool `json:"installed"`
 	// ServiceRunning is true when a vmcp process holds the lock of an
-	// owned cgroup. Install and teardown refuse to start then.
-	ServiceRunning bool        `json:"service_running"`
-	Checks         []api.Check `json:"checks,omitempty"`
+	// owned cgroup or watches one. Install and teardown refuse to start
+	// then.
+	ServiceRunning bool `json:"service_running"`
+	// ServiceProcesses names the processes that watch an owned cgroup.
+	ServiceProcesses []string    `json:"service_processes,omitempty"`
+	Checks           []api.Check `json:"checks,omitempty"`
 	// KilledProcesses counts the processes that teardown found in owned
 	// cgroups and killed.
 	KilledProcesses int            `json:"killed_processes"`
@@ -273,6 +276,7 @@ func (h *hostRun) check(ctx context.Context) error {
 		_, err := h.sys.loadedProfiles()
 		return err
 	}())
+	add("host-processes", h.sys.hostProcesses())
 	add("cpu-virtualization", func() error {
 		_, err := h.kvmModule()
 		return err
@@ -333,7 +337,17 @@ func (h *hostRun) status(ctx context.Context) error {
 func (h *hostRun) report(inv *inventory) {
 	h.res.Owned = inv.ownedResources()
 	h.res.OtherInstalls = inv.others
-	h.res.ServiceRunning = len(inv.locked) > 0
+	h.res.ServiceRunning = len(inv.locked) > 0 || len(inv.watchers) > 0
+	h.res.ServiceProcesses = watcherList(inv.watchers)
+}
+
+// watcherList describes the processes that watch owned cgroups.
+func watcherList(ws []cgroupWatcher) []string {
+	var out []string
+	for _, w := range ws {
+		out = append(out, fmt.Sprintf("PID %d (%s) watches %s", w.PID, w.Comm, w.Cgroup))
+	}
+	return out
 }
 
 func (h *hostRun) readReceipt(inv *inventory) *HostReceipt {

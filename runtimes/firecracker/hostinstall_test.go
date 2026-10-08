@@ -33,15 +33,21 @@ type hostCase struct {
 		// Locked means that a vmcp process holds the lock of the cgroup.
 		Locked bool `json:"locked"`
 	} `json:"cgroups"`
-	Files               map[string]string `json:"files"`
-	LoadedProfiles      map[string]string `json:"loaded_profiles"`
-	Links               []hostLink        `json:"links"`
-	NftTables           []hostTable       `json:"nft_tables"`
-	WantRemoved         []string          `json:"want_removed"`
-	WantKilledProcesses int               `json:"want_killed_processes"`
-	WantConflicts       []string          `json:"want_conflicts"`
-	WantOtherInstalls   []string          `json:"want_other_installs"`
-	WantKeptProfiles    []string          `json:"want_kept_profiles"`
+	Files          map[string]string `json:"files"`
+	LoadedProfiles map[string]string `json:"loaded_profiles"`
+	Links          []hostLink        `json:"links"`
+	NftTables      []hostTable       `json:"nft_tables"`
+	// Watchers are processes that watch a cgroup, with the cgroup path
+	// under the fake cgroup root.
+	Watchers []cgroupWatcher `json:"watchers"`
+	// NoHostProcesses means that the host command cannot see the host
+	// processes.
+	NoHostProcesses     bool     `json:"no_host_processes"`
+	WantRemoved         []string `json:"want_removed"`
+	WantKilledProcesses int      `json:"want_killed_processes"`
+	WantConflicts       []string `json:"want_conflicts"`
+	WantOtherInstalls   []string `json:"want_other_installs"`
+	WantKeptProfiles    []string `json:"want_kept_profiles"`
 }
 
 type logLine struct {
@@ -57,7 +63,14 @@ type hostInput struct {
 	UntaggedConfigFile hostCase `json:"untagged_config_file"`
 	BlockedInstall     hostCase `json:"blocked_install"`
 	ServiceRunning     hostCase `json:"service_running"`
-	NftRuleset         struct {
+	OldService         hostCase `json:"old_service"`
+	NoHostProcesses    hostCase `json:"no_host_processes"`
+	Inotify            []struct {
+		Name   string         `json:"name"`
+		Fdinfo string         `json:"fdinfo"`
+		Want   []inotifyWatch `json:"want"`
+	} `json:"inotify"`
+	NftRuleset struct {
 		Ruleset string      `json:"ruleset"`
 		Want    []hostTable `json:"want"`
 	} `json:"nft_ruleset"`
@@ -85,6 +98,8 @@ type fakeHost struct {
 	linkList []hostLink
 	tables   []hostTable
 	locked   map[string]bool
+	watchers []cgroupWatcher
+	procErr  error
 	kills    []string
 }
 
@@ -233,6 +248,21 @@ func (f *fakeHost) lockCgroup(path string) (func(), error) {
 
 func (f *fakeHost) nftTables() ([]hostTable, error) { return slices.Clone(f.tables), nil }
 
+func (f *fakeHost) hostProcesses() error { return f.procErr }
+
+func (f *fakeHost) cgroupWatchers(paths []string) ([]cgroupWatcher, error) {
+	if f.procErr != nil {
+		return nil, f.procErr
+	}
+	var out []cgroupWatcher
+	for _, w := range f.watchers {
+		if slices.Contains(paths, w.Cgroup) {
+			out = append(out, w)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeHost) deleteNftTable(family, name string) error {
 	f.tables = slices.DeleteFunc(f.tables, func(t hostTable) bool { return t.Family == family && t.Name == name })
 	return nil
@@ -282,6 +312,13 @@ func newFakeHost(t *testing.T, id string, tc hostCase, log *slog.Logger) (*fakeH
 			f.tags[p] = c.Owner
 		}
 		f.locked[p] = c.Locked
+	}
+	for _, w := range tc.Watchers {
+		w.Cgroup = filepath.Join(f.cgroups, w.Cgroup)
+		f.watchers = append(f.watchers, w)
+	}
+	if tc.NoHostProcesses {
+		f.procErr = errors.New("the host processes are not visible")
 	}
 	for name, body := range tc.Files {
 		write(filepath.Join(dir, "host", name), body)
@@ -669,40 +706,83 @@ func traceHandler(w io.Writer) slog.Handler {
 }
 
 // TestHostRefusesWhileServiceRuns proves that teardown and install refuse
-// to start while a vmcp process holds the lock of an owned cgroup, change
-// nothing, and report the running service. Without the lock, teardown
-// removed the parent cgroup and the profile of a running service whose
-// machine cgroups were empty.
+// to start while the vmcp service of the install runs, change nothing, and
+// report the running service: a service that holds the lock of its parent
+// cgroup, and an older version without the lock that only watches it.
+// Without the check, teardown removed the parent cgroup and the profile of
+// a running service whose machine cgroups were empty.
 func TestHostRefusesWhileServiceRuns(t *testing.T) {
 	in := readHostInput(t)
-	tc := in.ServiceRunning
-	if len(tc.Cgroups) == 0 {
-		t.Fatal("host input has no service_running case")
-	}
-	for _, command := range []string{"teardown", "install"} {
-		f, cfg := newFakeHost(t, in.InstallID, tc, nil)
-		res := RunHostCommand(context.Background(), command, cfg)
-		if res.OK || !res.ServiceRunning || len(res.Removed) != 0 || len(res.Written) != 0 || len(res.Owned) == 0 {
-			t.Errorf("%s: ok %t service_running %t removed %d written %d owned %d, want a refusal with no change that reports the owned resources",
-				command, res.OK, res.ServiceRunning, len(res.Removed), len(res.Written), len(res.Owned))
+	for name, tc := range map[string]hostCase{"locked parent": in.ServiceRunning, "older version": in.OldService} {
+		if len(tc.Cgroups) == 0 {
+			t.Fatalf("host input has no %s case", name)
 		}
-		for name, body := range tc.Files {
-			if got, err := os.ReadFile(filepath.Join(cfg.HostRoot, name)); err != nil || string(got) != body {
-				t.Errorf("%s: file /%s changed or is gone: %v", command, name, err)
+		for _, command := range []string{"teardown", "install"} {
+			f, cfg := newFakeHost(t, in.InstallID, tc, nil)
+			res := RunHostCommand(context.Background(), command, cfg)
+			if res.OK || !res.ServiceRunning || len(res.Removed) != 0 || len(res.Written) != 0 || len(res.Owned) == 0 {
+				t.Errorf("%s, %s: ok %t service_running %t removed %d written %d owned %d, want a refusal with no change that reports the owned resources",
+					name, command, res.OK, res.ServiceRunning, len(res.Removed), len(res.Written), len(res.Owned))
 			}
+			if len(tc.Watchers) > 0 && len(res.ServiceProcesses) != len(tc.Watchers) {
+				t.Errorf("%s, %s: service_processes = %q, want one per watcher %+v", name, command, res.ServiceProcesses, tc.Watchers)
+			}
+			for file, body := range tc.Files {
+				if got, err := os.ReadFile(filepath.Join(cfg.HostRoot, file)); err != nil || string(got) != body {
+					t.Errorf("%s, %s: file /%s changed or is gone: %v", name, command, file, err)
+				}
+			}
+			for _, c := range tc.Cgroups {
+				if !exists(filepath.Join(cfg.CgroupRoot, c.Path)) {
+					t.Errorf("%s, %s: cgroup %s is gone", name, command, c.Path)
+				}
+			}
+			if len(f.profiles) != len(tc.LoadedProfiles) {
+				t.Errorf("%s, %s: loaded profiles = %v, want %v", name, command, f.profiles, tc.LoadedProfiles)
+			}
+		}
+		_, cfg := newFakeHost(t, in.InstallID, tc, nil)
+		if st := RunHostCommand(context.Background(), "status", cfg); !st.OK || !st.ServiceRunning {
+			t.Errorf("%s, status: ok %t service_running %t, want ok and a running service", name, st.OK, st.ServiceRunning)
+		}
+	}
+}
+
+// TestHostRefusesWithoutHostProcesses proves that the host commands fail
+// closed when they cannot see the host processes: check reports it, and
+// install, teardown, and status refuse, so that a running service is never
+// missed.
+func TestHostRefusesWithoutHostProcesses(t *testing.T) {
+	in := readHostInput(t)
+	tc := in.NoHostProcesses
+	if !tc.NoHostProcesses || len(tc.Cgroups) == 0 {
+		t.Fatal("host input has no no_host_processes case")
+	}
+	for _, command := range []string{"check", "install", "teardown", "status"} {
+		_, cfg := newFakeHost(t, in.InstallID, tc, nil)
+		res := RunHostCommand(context.Background(), command, cfg)
+		if res.OK || len(res.Removed) != 0 || len(res.Written) != 0 {
+			t.Errorf("%s: ok %t removed %d written %d, want a refusal with no change", command, res.OK, len(res.Removed), len(res.Written))
 		}
 		for _, c := range tc.Cgroups {
 			if !exists(filepath.Join(cfg.CgroupRoot, c.Path)) {
 				t.Errorf("%s: cgroup %s is gone", command, c.Path)
 			}
 		}
-		if len(f.profiles) != len(tc.LoadedProfiles) {
-			t.Errorf("%s: loaded profiles = %v, want %v", command, f.profiles, tc.LoadedProfiles)
-		}
 	}
-	_, cfg := newFakeHost(t, in.InstallID, tc, nil)
-	if st := RunHostCommand(context.Background(), "status", cfg); !st.OK || !st.ServiceRunning {
-		t.Errorf("status: ok %t service_running %t, want ok and a running service", st.OK, st.ServiceRunning)
+}
+
+// TestParseInotify proves the reading of inotify watches from fdinfo. A
+// wrong parse would miss the watch of a running vmcp service.
+func TestParseInotify(t *testing.T) {
+	in := readHostInput(t)
+	if len(in.Inotify) == 0 {
+		t.Fatal("host input has no inotify cases")
+	}
+	for _, tc := range in.Inotify {
+		if got := parseInotify([]byte(tc.Fdinfo)); !slices.Equal(got, tc.Want) {
+			t.Errorf("%s: parseInotify() = %+v, want %+v", tc.Name, got, tc.Want)
+		}
 	}
 }
 
