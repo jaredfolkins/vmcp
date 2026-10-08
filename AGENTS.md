@@ -135,6 +135,12 @@ each machine leaves a zombie Firecracker process.
   caller. Never publish its port on a host interface.
 - Errors use `api.ErrorResponse` with a fixed `api.ErrorCode` and a safe
   message.
+- Secrets: `process.secret_env` entries and `secret` files are never stored
+  and never written to host disk. The host sends them to the guest agent
+  over vsock in one message after the agent's Hello. Secret files must be
+  under `/run`, a guest tmpfs. The record keeps only secret entry names.
+  Each secret value of 8 bytes or more is redacted from events, also when it
+  is split across output chunks.
 - A create with an existing `name` and the same spec returns the existing
   machine. A different spec with the same name is a conflict.
 - Every machine event has a sequence number. A caller resumes a stream with

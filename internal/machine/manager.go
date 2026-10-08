@@ -40,14 +40,23 @@ const (
 	defaultOutputLimit = 16 << 20
 	maxDriveMiB        = 64 << 10
 	maxDrives          = 16
-	maxFiles           = 64
+	maxFiles           = 512
 	maxFileBytes       = 1 << 20
+	maxTotalFileBytes  = 16 << 20
+	maxSecretEnv       = 256
+	maxSecretEnvBytes  = 1 << 20
 	maxLabels          = 32
+	// minAutoRedaction is the shortest secret value that vmcp redacts by
+	// itself. A shorter value would erase common text.
+	minAutoRedaction = 8
+	// secretRoot is the guest tmpfs for secret files.
+	secretRoot = "/run/"
 )
 
 var (
-	nameRE  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
-	driveRE = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+	nameRE    = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+	driveRE   = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+	envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 )
 
 // Config configures a Manager.
@@ -388,10 +397,33 @@ func (m *Manager) validate(spec api.MachineSpec) error {
 			return errorf(api.ErrInvalidRequest, "drive %q guest path must be a clean absolute path", d.Name)
 		}
 	}
+	total := 0
 	for _, f := range spec.Files {
 		if !filepath.IsAbs(f.GuestPath) || filepath.Clean(f.GuestPath) != f.GuestPath || len(f.Body) > maxFileBytes {
 			return errorf(api.ErrInvalidRequest, "file %q is invalid", f.GuestPath)
 		}
+		if f.Secret && !strings.HasPrefix(f.GuestPath, secretRoot) {
+			return errorf(api.ErrInvalidRequest, "secret file %q must be under %s", f.GuestPath, secretRoot)
+		}
+		total += len(f.Body)
+	}
+	if total > maxTotalFileBytes {
+		return errorf(api.ErrInvalidRequest, "files exceed %d bytes", maxTotalFileBytes)
+	}
+	if len(spec.Process.SecretEnv) > maxSecretEnv {
+		return errorf(api.ErrInvalidRequest, "too many secret_env entries")
+	}
+	envBytes := 0
+	for _, kv := range spec.Process.SecretEnv {
+		k, _, ok := strings.Cut(kv, "=")
+		if !ok || !envNameRE.MatchString(k) {
+			// Name the index only: the entry may hold a secret.
+			return errorf(api.ErrInvalidRequest, "secret_env entries must be NAME=VALUE")
+		}
+		envBytes += len(kv)
+	}
+	if envBytes > maxSecretEnvBytes {
+		return errorf(api.ErrInvalidRequest, "secret_env exceeds %d bytes", maxSecretEnvBytes)
 	}
 	return nil
 }
@@ -417,6 +449,12 @@ func sanitize(spec api.MachineSpec) api.MachineSpec {
 		out.Network.Upstreams = append(out.Network.Upstreams, u)
 	}
 	out.Redactions = nil
+	// Keep secret entry names for the record; never their values.
+	out.Process.SecretEnv = nil
+	for _, kv := range spec.Process.SecretEnv {
+		k, _, _ := strings.Cut(kv, "=")
+		out.Process.SecretEnv = append(out.Process.SecretEnv, k)
+	}
 	return out
 }
 
@@ -612,18 +650,34 @@ func (m *Manager) launch(en *entry, spec api.MachineSpec) (Launch, error) {
 	user := firstNonEmpty(spec.Process.User, p.User)
 	return Launch{
 		ID: en.rec.Machine.ID, Slot: en.rec.Slot, Dir: m.machineDir(en.rec.Machine.ID), ImageID: spec.Image,
-		Spec: spec, Args: args, Env: mergeEnv(p.Env, spec.Process.Env), WorkDir: dir, User: user,
-		Sink: &sink{m: m, en: en, redactions: copyRedactions(spec.Redactions), limit: outputLimit(spec)},
+		Spec: spec, Args: args, Env: mergeEnv(p.Env, spec.Process.Env), SecretEnv: spec.Process.SecretEnv,
+		WorkDir: dir, User: user,
+		Sink: newSink(m, en, secretRedactions(spec), outputLimit(spec)),
 	}, nil
 }
 
-// copyRedactions gives the sink its own copy. StartMachine clears the
-// spec copy after provisioning.
-func copyRedactions(in [][]byte) [][]byte {
-	out := make([][]byte, 0, len(in))
-	for _, r := range in {
-		if len(r) > 0 {
-			out = append(out, append([]byte(nil), r...))
+// secretRedactions returns the sink's own copy of every byte string to
+// redact: the caller's redactions, and each secret_env value and secret file
+// body of at least minAutoRedaction bytes. StartMachine clears the spec copy
+// after provisioning.
+func secretRedactions(spec api.MachineSpec) [][]byte {
+	var out [][]byte
+	add := func(b []byte) {
+		if len(b) > 0 {
+			out = append(out, append([]byte(nil), b...))
+		}
+	}
+	for _, r := range spec.Redactions {
+		add(r)
+	}
+	for _, kv := range spec.Process.SecretEnv {
+		if _, v, _ := strings.Cut(kv, "="); len(v) >= minAutoRedaction {
+			add([]byte(v))
+		}
+	}
+	for _, f := range spec.Files {
+		if f.Secret && len(f.Body) >= minAutoRedaction {
+			add(f.Body)
 		}
 	}
 	return out
@@ -820,6 +874,7 @@ func (m *Manager) finish(en *entry, res Result) {
 	}
 	m.mu.Unlock()
 	if snk != nil {
+		snk.flush()
 		snk.clear()
 	}
 	_ = m.save(en)
@@ -893,35 +948,66 @@ func terminal(s api.MachineState) bool {
 }
 
 // sink applies redaction and the output limit, then appends events.
+// Redaction streams: a secret split across two output chunks is still
+// redacted. Each stream keeps back only the trailing bytes that could start
+// a secret, and flush releases them before the exit event.
 type sink struct {
 	m          *Manager
 	en         *entry
 	redactions [][]byte
 	limit      int64
 	limitHit   bool
+	pending    map[api.EventKind][]byte
 	mu         sync.Mutex
+}
+
+func newSink(m *Manager, en *entry, redactions [][]byte, limit int64) *sink {
+	return &sink{m: m, en: en, redactions: redactions, limit: limit, pending: map[api.EventKind][]byte{}}
 }
 
 func (s *sink) Event(ev api.Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if ev.Kind == api.EventStdout || ev.Kind == api.EventStderr {
-		for _, r := range s.redactions {
-			if len(r) > 0 {
-				ev.Data = bytes.ReplaceAll(ev.Data, r, []byte("[REDACTED]"))
-			}
+	if ev.Kind != api.EventStdout && ev.Kind != api.EventStderr {
+		_ = s.en.events.append(ev)
+		return
+	}
+	buf := append(s.pending[ev.Kind], ev.Data...)
+	out, hold := redactStream(buf, s.redactions)
+	s.pending[ev.Kind] = hold
+	if len(out) == 0 {
+		return
+	}
+	ev.Data = out
+	s.emitOutput(ev)
+}
+
+// emitOutput counts output against the limit and appends it. The caller
+// holds s.mu.
+func (s *sink) emitOutput(ev api.Event) {
+	s.en.output += int64(len(ev.Data))
+	if s.en.output > s.limit {
+		if !s.limitHit {
+			s.limitHit = true
+			s.en.log.WarnContext(s.en.traceCtx, "machine output limit reached", "code", "output_limit", "limit_bytes", s.limit)
 		}
-		s.en.output += int64(len(ev.Data))
-		if s.en.output > s.limit {
-			if !s.limitHit {
-				s.limitHit = true
-				s.en.log.WarnContext(s.en.traceCtx, "machine output limit reached", "code", "output_limit", "limit_bytes", s.limit)
-			}
-			s.m.kill(s.en, "output-limit")
-			return
-		}
+		s.m.kill(s.en, "output-limit")
+		return
 	}
 	_ = s.en.events.append(ev)
+}
+
+// flush releases the held tail of each stream. The process has ended, so a
+// held tail cannot become a secret any more.
+func (s *sink) flush() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, kind := range []api.EventKind{api.EventStdout, api.EventStderr} {
+		if tail := s.pending[kind]; len(tail) > 0 {
+			s.emitOutput(api.Event{Kind: kind, Data: tail})
+		}
+		delete(s.pending, kind)
+	}
 }
 
 // clear wipes the redaction secrets after the machine ended.
@@ -932,7 +1018,49 @@ func (s *sink) clear() {
 		clear(r)
 	}
 	s.redactions = nil
+	for k, b := range s.pending {
+		clear(b)
+		delete(s.pending, k)
+	}
 }
+
+// redactStream replaces every redaction in buf. It returns the bytes that
+// are safe to emit and the tail to hold: the longest suffix of buf that is
+// a proper prefix of some redaction, which the next chunk may complete.
+func redactStream(buf []byte, redactions [][]byte) (out, hold []byte) {
+	for _, r := range redactions {
+		if len(r) > 0 && bytes.Contains(buf, r) {
+			buf = bytes.ReplaceAll(buf, r, []byte(redactedText))
+		}
+	}
+	keep := 0
+	for _, r := range redactions {
+		if n := partialSuffix(buf, r); n > keep {
+			keep = n
+		}
+	}
+	cut := len(buf) - keep
+	return buf[:cut:cut], append([]byte(nil), buf[cut:]...)
+}
+
+// partialSuffix returns the length of the longest suffix of buf that is a
+// proper prefix of r.
+func partialSuffix(buf, r []byte) int {
+	start := max(0, len(buf)-len(r)+1)
+	for i := start; i < len(buf); i++ {
+		j := bytes.IndexByte(buf[i:], r[0])
+		if j < 0 {
+			return 0
+		}
+		i += j
+		if bytes.HasPrefix(r, buf[i:]) {
+			return len(buf) - i
+		}
+	}
+	return 0
+}
+
+const redactedText = "[REDACTED]"
 
 func safeDetail(err error) string {
 	var me *Error

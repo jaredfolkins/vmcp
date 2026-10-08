@@ -2,8 +2,10 @@
 //
 // The host gives the agent its configuration on a raw config drive. The
 // agent sends ordered messages to the host over vsock port EventPort and
-// the tar of each writable drive over vsock port DrivePort. The host never
-// sends commands over vsock in this version.
+// the tar of each writable drive over vsock port DrivePort. After the
+// agent's Hello, the host sends exactly one Secrets message back on the
+// EventPort connection. Secrets never go on the config drive, so they never
+// touch host disk.
 package agentproto
 
 import (
@@ -16,7 +18,7 @@ import (
 )
 
 // Version is the protocol version in Hello and Config.
-const Version = 1
+const Version = 2
 
 // Guest paths and devices.
 const (
@@ -43,6 +45,10 @@ const (
 const (
 	MaxConfigBytes = 16 << 20
 	MaxLineBytes   = 64 << 10
+	// MaxSecretsBytes bounds the one Secrets line.
+	MaxSecretsBytes = 24 << 20
+	// SecretRoot is the guest tmpfs that holds every secret file.
+	SecretRoot = "/run"
 )
 
 var configMagic = [8]byte{'V', 'M', 'C', 'P', 'C', 'F', 'G', '1'}
@@ -141,6 +147,8 @@ const (
 	TypeExit MessageType = "exit"
 	// TypeDone is the last message. Every drive tar was sent.
 	TypeDone MessageType = "done"
+	// TypeSecrets is the one host-to-guest message, sent after Hello.
+	TypeSecrets MessageType = "secrets"
 )
 
 // Message is one newline-delimited JSON message on EventPort.
@@ -152,6 +160,27 @@ type Message struct {
 	Data    []byte      `json:"data,omitempty"`
 	Code    int         `json:"code,omitempty"`
 	Detail  string      `json:"detail,omitempty"`
+	// Secrets is set only on TypeSecrets.
+	Secrets *Secrets `json:"secrets,omitempty"`
+}
+
+// Secrets are the process environment entries and files that must not be
+// stored. The agent writes the files under SecretRoot, a tmpfs, and adds
+// the entries to the process environment.
+type Secrets struct {
+	Env   []string `json:"env,omitempty"`
+	Files []File   `json:"files,omitempty"`
+}
+
+// Clear zeroes the file bodies.
+func (s *Secrets) Clear() {
+	if s == nil {
+		return
+	}
+	for i := range s.Files {
+		clear(s.Files[i].Body)
+	}
+	s.Env = nil
 }
 
 // DriveHeader is the first line on a DrivePort connection. The tar stream

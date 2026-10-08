@@ -61,6 +61,9 @@ type Machine struct {
 	log       *slog.Logger
 	traceCtx  context.Context
 	bootStart time.Time
+	// secrets go to the guest once, after its Hello, and are then cleared.
+	// They are never written to disk.
+	secrets *agentproto.Secrets
 
 	mu         sync.Mutex
 	booted     bool
@@ -92,6 +95,7 @@ func (r *Runtime) Provision(ctx context.Context, ls machine.Launch) (inst machin
 	if m.log == nil {
 		m.log = r.cfg.Logger.With("machine", ls.ID)
 	}
+	m.secrets = launchSecrets(ls)
 	m.jailRoot = filepath.Join(r.cfg.JailBase, "firecracker", m.jailID, "root")
 	m.cgroup = filepath.Join(r.cgroupParent(), m.jailID)
 	if m.imgMeta, err = image.ReadMeta(r.ImageDir(ls.ImageID)); err != nil {
@@ -227,6 +231,9 @@ func (m *Machine) writeConfigs() error {
 		})
 	}
 	for _, f := range m.spec.Spec.Files {
+		if f.Secret {
+			continue
+		}
 		cfg.Files = append(cfg.Files, agentproto.File{GuestPath: f.GuestPath, Mode: f.Mode, Body: f.Body})
 	}
 	n := m.spec.Spec.Network
@@ -494,6 +501,10 @@ func (m *Machine) teardown(ctx context.Context) string {
 	logCtx := m.traceCtx
 	m.mu.Unlock()
 	_, span := trace.Start(logCtx, m.log, "teardown")
+	m.mu.Lock()
+	m.secrets.Clear()
+	m.secrets = nil
+	m.mu.Unlock()
 	ok := true
 	step := func(name string, err error) {
 		if err != nil {
@@ -575,6 +586,7 @@ func (m *Machine) readEvents(c net.Conn) {
 		}
 		switch msg.Type {
 		case agentproto.TypeHello:
+			m.sendSecrets(c)
 			m.mu.Lock()
 			logCtx, bootStart := m.traceCtx, m.bootStart
 			m.mu.Unlock()
@@ -595,6 +607,43 @@ func (m *Machine) readEvents(c net.Conn) {
 			m.mu.Unlock()
 		}
 	}
+}
+
+// launchSecrets copies the secret entries and files of a launch. The
+// manager clears its copy after Provision returns.
+func launchSecrets(ls machine.Launch) *agentproto.Secrets {
+	s := &agentproto.Secrets{Env: append([]string(nil), ls.SecretEnv...)}
+	for _, f := range ls.Spec.Files {
+		if f.Secret {
+			s.Files = append(s.Files, agentproto.File{GuestPath: f.GuestPath, Mode: f.Mode, Body: append([]byte(nil), f.Body...)})
+		}
+	}
+	return s
+}
+
+// sendSecrets writes the one Secrets message on the event connection and
+// clears the host copy. A second Hello gets no secrets.
+func (m *Machine) sendSecrets(c net.Conn) {
+	m.mu.Lock()
+	secrets := m.secrets
+	m.secrets = nil
+	logCtx := m.traceCtx
+	m.mu.Unlock()
+	if secrets == nil {
+		secrets = &agentproto.Secrets{}
+	}
+	defer secrets.Clear()
+	raw, err := json.Marshal(agentproto.Message{Type: agentproto.TypeSecrets, Secrets: secrets})
+	if err == nil {
+		raw = append(raw, '\n')
+		_, err = c.Write(raw)
+	}
+	clear(raw)
+	if err != nil {
+		m.log.WarnContext(logCtx, "secrets not delivered", "code", "secrets_delivery_failed", "error", trace.BoundedError(err))
+		return
+	}
+	m.log.DebugContext(logCtx, "secrets delivered", "entries", len(secrets.Env), "files", len(secrets.Files))
 }
 
 func bounded(s string, n int) string {

@@ -30,15 +30,17 @@ import (
 var liveConfig = flag.String("vmcp-live-config", "", "HuJSON file for the Firecracker live gate")
 
 type liveCfg struct {
-	StateRoot    string   `json:"state_root"`
-	JailBase     string   `json:"jail_base"`
-	KernelPath   string   `json:"kernel_path"`
-	AgentPath    string   `json:"agent_path"`
-	CgroupParent string   `json:"cgroup_parent"`
-	Pool         string   `json:"pool"`
-	DNSUpstreams []string `json:"dns_upstreams"`
-	ImageRef     string   `json:"image_ref"`
-	EgressURL    string   `json:"egress_url"`
+	StateRoot      string   `json:"state_root"`
+	JailBase       string   `json:"jail_base"`
+	KernelPath     string   `json:"kernel_path"`
+	AgentPath      string   `json:"agent_path"`
+	CgroupParent   string   `json:"cgroup_parent"`
+	Pool           string   `json:"pool"`
+	DNSUpstreams   []string `json:"dns_upstreams"`
+	ImageRef       string   `json:"image_ref"`
+	EgressURL      string   `json:"egress_url"`
+	SecretValue    string   `json:"secret_value"`
+	SecretFilePath string   `json:"secret_file_path"`
 }
 
 func loadLiveCfg(t *testing.T) liveCfg {
@@ -143,6 +145,49 @@ func TestLiveFirecracker(t *testing.T) {
 		}
 		if got := tarFile(t, filepath.Join(dir, "out", "out.tar"), "f"); got != "data\n" {
 			t.Errorf("out drive file f = %q, want data", got)
+		}
+		checkProof(t, rt, res)
+	})
+
+	t.Run("secrets", func(t *testing.T) {
+		if c.SecretValue == "" || !strings.HasPrefix(c.SecretFilePath, "/run/") {
+			t.Fatal("live config needs secret_value and a secret_file_path under /run/")
+		}
+		spec := api.MachineSpec{
+			Process: api.Process{
+				Args: []string{"/bin/sh", "-c", fmt.Sprintf(
+					`[ "$VMCP_LIVE_SECRET" = "$(cat %s)" ] && echo SECRET_MATCH; grep -q ' /run tmpfs ' /proc/mounts && echo RUN_TMPFS; grep -c . %s`,
+					c.SecretFilePath, c.SecretFilePath)},
+				SecretEnv: []string{"VMCP_LIVE_SECRET=" + c.SecretValue},
+			},
+			Files: []api.File{{GuestPath: c.SecretFilePath, Mode: 0o400, Body: []byte(c.SecretValue), Secret: true}},
+		}
+		// The config drive is on host disk; it must not hold the secret.
+		dir := filepath.Join(rt.machinesDir(), "m-5566778899aabbcc")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		inst, err := rt.Provision(ctx, machine.Launch{ID: "m-5566778899aabbcc", Slot: 2, Dir: dir, ImageID: "img-live",
+			Spec: spec, Args: spec.Process.Args, SecretEnv: spec.Process.SecretEnv, WorkDir: "/", Sink: &recorder{}})
+		if err != nil {
+			t.Fatalf("Provision() error = %v", err)
+		}
+		raw, err := os.ReadFile(filepath.Join(inst.(*Machine).jailRoot, "config.bin"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(raw, []byte(c.SecretValue)) {
+			t.Error("config.bin on host disk holds the secret")
+		}
+		inst.Destroy(context.Background(), "test-cleanup")
+		_ = os.RemoveAll(dir)
+
+		rec, res, _ := runLive(t, ctx, rt, "m-66778899aabbccdd", 2, spec, "")
+		out := rec.output(api.EventStdout)
+		for _, want := range []string{"SECRET_MATCH", "RUN_TMPFS"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("secrets output missing %s; got %q", want, out)
+			}
 		}
 		checkProof(t, rt, res)
 	})
@@ -322,7 +367,8 @@ func runLive(t *testing.T, ctx context.Context, rt *Runtime, id string, slot int
 	}
 	m, err := rt.Provision(ctx, machine.Launch{
 		ID: id, Slot: slot, Dir: dir, ImageID: "img-live", Spec: spec,
-		Args: spec.Process.Args, Env: []string{"PATH=/bin:/usr/bin:/sbin:/usr/sbin"}, WorkDir: "/", User: user, Sink: rec,
+		Args: spec.Process.Args, Env: []string{"PATH=/bin:/usr/bin:/sbin:/usr/sbin"}, SecretEnv: spec.Process.SecretEnv,
+		WorkDir: "/", User: user, Sink: rec,
 	})
 	if err != nil {
 		t.Fatalf("Provision() error = %v", err)

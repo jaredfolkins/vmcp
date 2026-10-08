@@ -112,6 +112,11 @@ type MachineSpec struct {
 type Process struct {
 	Args []string `json:"args,omitempty"`
 	Env  []string `json:"env,omitempty"`
+	// SecretEnv entries are KEY=VALUE pairs that vmcp never stores. They
+	// reach the guest over vsock after boot, never through host disk, and
+	// replace a same-named Env entry. Each value of 8 bytes or more is
+	// redacted from events.
+	SecretEnv []string `json:"secret_env,omitempty"`
 	// User is "uid", "uid:gid", "name", or "name:group" in the guest.
 	User string `json:"user,omitempty"`
 	Dir  string `json:"dir,omitempty"`
@@ -165,7 +170,10 @@ type File struct {
 	GuestPath string `json:"guest_path"`
 	Mode      uint32 `json:"mode"`
 	Body      []byte `json:"body"`
-	Secret    bool   `json:"secret,omitempty"`
+	// Secret files must be under /run, a guest tmpfs. vmcp never stores
+	// their bodies, delivers them over vsock after boot, and redacts a body
+	// of 8 bytes or more from events.
+	Secret bool `json:"secret,omitempty"`
 }
 
 // MachineState is the state of a machine.

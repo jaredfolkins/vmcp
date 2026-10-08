@@ -65,9 +65,11 @@ type Launch struct {
 	Spec    api.MachineSpec
 	Args    []string
 	Env     []string
-	WorkDir string
-	User    string
-	Sink    Sink
+	// SecretEnv and the secret Files of Spec must never be written to disk.
+	SecretEnv []string
+	WorkDir   string
+	User      string
+	Sink      Sink
 	// Logger is the machine logger. Its lines carry the machine identity
 	// and the trace of the request that started the machine.
 	Logger *slog.Logger

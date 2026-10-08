@@ -11,4 +11,8 @@
   // busybox 1.37.0 image index; the runtime selects linux/amd64.
   "image_ref": "docker.io/library/busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
   "egress_url": "http://example.com/",
+  // A fake secret for the secrets subtest. It proves delivery over vsock
+  // and its absence from the config drive on host disk.
+  "secret_value": "live-gate-fake-secret-0123456789",
+  "secret_file_path": "/run/vmcp-live/secret.txt",
 }

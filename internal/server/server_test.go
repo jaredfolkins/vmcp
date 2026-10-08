@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -84,6 +85,21 @@ func (i *fakeInstance) Boot(context.Context) error {
 			<-i.kill
 		case prog == "hang":
 			<-i.kill
+		case strings.HasPrefix(prog, "leak:"):
+			// Print every secret value in chunks of n bytes, so that each
+			// value is split across chunks.
+			n, _ := strconv.Atoi(strings.TrimPrefix(prog, "leak:"))
+			var all []byte
+			for _, kv := range i.l.SecretEnv {
+				_, v, _ := strings.Cut(kv, "=")
+				all = append(all, "value="+v+"\n"...)
+			}
+			for len(all) > 0 {
+				k := min(n, len(all))
+				i.l.Sink.Event(api.Event{Kind: api.EventStdout, Data: append([]byte(nil), all[:k]...)})
+				all = all[k:]
+			}
+			exit = &api.Exit{Code: 0, Reason: api.ExitCompleted}
 		}
 		i.finish(exit)
 	}()

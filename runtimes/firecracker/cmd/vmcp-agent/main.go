@@ -62,13 +62,20 @@ func run(ev *events) (int, error) {
 		return 0, err
 	}
 	ev.send(agentproto.Message{Type: agentproto.TypeHello, Version: agentproto.Version})
+	secrets, err := ev.readSecrets()
+	if err != nil {
+		return 0, err
+	}
+	defer secrets.Clear()
 	cfg, err := readConfig()
 	if err != nil {
 		return 0, err
 	}
-	if err := buildRoot(cfg); err != nil {
+	if err := buildRoot(cfg, secrets); err != nil {
 		return 0, err
 	}
+	// Secret entries come last, so they replace a same-named entry.
+	cfg.Env = append(cfg.Env, secrets.Env...)
 	ev.send(agentproto.Message{Type: agentproto.TypeStep, Step: "start-process", Status: "running"})
 	code, err := runProcess(cfg, ev)
 	if err != nil {
@@ -116,8 +123,9 @@ func readConfig() (agentproto.Config, error) {
 	return agentproto.DecodeConfig(bufio.NewReader(f))
 }
 
-// buildRoot mounts the overlay root, the spec drives, and the spec files.
-func buildRoot(cfg agentproto.Config) error {
+// buildRoot mounts the overlay root, the secret tmpfs, the spec drives, the
+// spec files, and the secret files.
+func buildRoot(cfg agentproto.Config, secrets *agentproto.Secrets) error {
 	if err := mountAt(agentproto.UpperDevice, upperMount, "ext4", unix.MS_NOSUID|unix.MS_NODEV, ""); err != nil {
 		return err
 	}
@@ -139,6 +147,8 @@ func buildRoot(cfg agentproto.Config) error {
 		{"devtmpfs", "dev", "devtmpfs", "", unix.MS_NOSUID},
 		{"devpts", "dev/pts", "devpts", "newinstance,ptmxmode=0666", unix.MS_NOSUID | unix.MS_NOEXEC},
 		{"tmpfs", "dev/shm", "tmpfs", "mode=1777", unix.MS_NOSUID | unix.MS_NODEV},
+		// Secret files live only in guest memory, never in the upper disk.
+		{"tmpfs", strings.TrimPrefix(agentproto.SecretRoot, "/"), "tmpfs", "mode=0755", unix.MS_NOSUID | unix.MS_NODEV},
 	} {
 		if err := mountAt(m.src, filepath.Join(mergedRoot, m.dst), m.fstype, m.flags, m.data); err != nil {
 			return err
@@ -162,6 +172,15 @@ func buildRoot(cfg agentproto.Config) error {
 			return err
 		}
 		clear(cfg.Files[i].Body)
+	}
+	for i := range secrets.Files {
+		if !strings.HasPrefix(secrets.Files[i].GuestPath, agentproto.SecretRoot+"/") {
+			return fmt.Errorf("secret file %q is outside %s", secrets.Files[i].GuestPath, agentproto.SecretRoot)
+		}
+		if err := writeFile(secrets.Files[i]); err != nil {
+			return err
+		}
+		clear(secrets.Files[i].Body)
 	}
 	if cfg.DNS != "" {
 		if err := os.WriteFile(filepath.Join(mergedRoot, "etc/resolv.conf"), []byte("nameserver "+cfg.DNS+"\n"), 0o644); err != nil {
@@ -423,8 +442,26 @@ func readColonFile(path string) [][]string {
 // events is the ordered message channel to the host.
 type events struct {
 	mu   sync.Mutex
-	conn io.WriteCloser
+	conn *os.File
 	enc  *json.Encoder
+}
+
+// readSecrets reads the one Secrets message that the host sends after
+// Hello.
+func (e *events) readSecrets() (*agentproto.Secrets, error) {
+	line, err := bufio.NewReaderSize(io.LimitReader(e.conn, agentproto.MaxSecretsBytes), 64<<10).ReadBytes('\n')
+	if err != nil {
+		return nil, fmt.Errorf("read secrets: %w", err)
+	}
+	defer clear(line)
+	var m agentproto.Message
+	if err := json.Unmarshal(line, &m); err != nil || m.Type != agentproto.TypeSecrets {
+		return nil, errors.New("the host did not send secrets after hello")
+	}
+	if m.Secrets == nil {
+		return &agentproto.Secrets{}, nil
+	}
+	return m.Secrets, nil
 }
 
 func (e *events) send(m agentproto.Message) {
