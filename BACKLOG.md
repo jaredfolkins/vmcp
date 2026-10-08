@@ -36,7 +36,10 @@ that every item follows.
    tags, also those of older versions. Their live gate passed on Ubuntu
    24.04 amd64: install, a second install, teardown of planted older
    tagged resources with untagged look-alikes left untouched, and nothing
-   tagged left. Open: the service transaction (lock, quiesce, journal,
+   tagged left. Since commit `10d693d`, install and teardown refuse while
+   the vmcp service of the install runs, and teardown removes tagged
+   nftables tables of the host network namespace. Open: the service
+   transaction (lock, quiesce, journal,
    service stop and start, verification with machines, rollback, purge,
    and preserved state), the OS folder entry points, and the live gate on
    Debian 12.

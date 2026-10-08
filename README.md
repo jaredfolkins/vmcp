@@ -139,16 +139,18 @@ JSON result.
 | --- | --- |
 | `check` | Checks root, the host `/etc` mount, cgroup v2, AppArmor, and CPU virtualization. No change. |
 | `install` | Runs `check` and `teardown`, then writes the seccomp profile, the AppArmor profile `vmcp-<id>` (loaded in enforce mode), the parent cgroup `vmcp-<id>` delegated to UID `65532`, `/etc/tmpfiles.d/vmcp-<id>.conf`, which creates that cgroup again at each host boot, and the KVM and TUN module file. It verifies them and writes `/etc/vmcp/<id>/receipt.json` last. |
-| `teardown` | Removes every host resource with the tag of the install, also from older vmcp versions. |
-| `status` | Prints the tagged inventory and the receipt. |
+| `teardown` | Removes every host resource with the tag of the install, also from older vmcp versions. Refuses while the vmcp service of the install runs. |
+| `status` | Prints the tagged inventory, whether the service runs, and the receipt. |
 
 Every host resource carries the install identity: the first line
 `# vmcp-owner: <id>` of each host text file, a marker file in
 `/etc/vmcp/<id>/`, the `trusted.vmcp.owner` attribute of the parent cgroup,
-the profile name `vmcp-<id>`, and the alias `vmcp:<id>:...` of host links.
-Teardown finds resources by these tags and removes only them. It reports an
-untagged look-alike or a resource of another install and does not touch it.
-Stop the vmcp service before `install` or `teardown`.
+the profile name `vmcp-<id>`, the alias `vmcp:<id>:...` of host links, and
+the comment `vmcp:<id>` of the vmcp nftables table. Teardown finds
+resources by these tags and removes only them. It reports an untagged
+look-alike or a resource of another install and does not touch it.
+`vmcp serve` holds a lock on its parent cgroup while it runs. `install` and
+`teardown` refuse while it is held, so stop the vmcp service first.
 
 A host reboot empties the cgroup file system. The install brings itself
 back before Docker starts the service: AppArmor loads the profile,

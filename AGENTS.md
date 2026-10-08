@@ -99,6 +99,26 @@
   - A real host reboot is NOT VERIFIED. At a real boot, the root
     `cgroup.subtree_control` must enable `cpu`, `memory`, and `pids` when
     systemd-tmpfiles-setup runs; that is NOT VERIFIED.
+- Live evidence of the service lock, the host nftables scan, and the
+  mount-table posture check on 2026-10-08, commit `10d693d`, on the same
+  host, with steps 1 to 6 of
+  [Container settings](#container-settings-proven-by-the-live-gate):
+  - `TestLiveFirecracker` passed all five subtests, and
+    `TestEphemeralMachine` and the self-test passed through Compose. The
+    posture check passed on every machine with the mount-table comparison.
+    The kernel log had zero `apparmor="DENIED"` lines for `vmcp-live-gate`
+    and no suppressed audit line.
+  - The `vmcp` table in the network namespace of the service had the
+    comment `vmcp:live-gate`.
+  - While the service ran with no machine, `vmcp host status` reported
+    `service_running: true`. `vmcp host teardown` and `vmcp host install`
+    exited with status 1, reported `service_running: true` and the
+    `host_service_running` code, and removed and wrote nothing.
+  - After the service stopped, `vmcp host teardown` removed two planted
+    host-namespace tables with the comment `vmcp:live-gate` (`inet vmcp`
+    and `inet vmcp-old-live-gate`) with the other planted older resources,
+    and reported the untagged table `inet vmcp-lookalike`, which it did
+    not touch. Two installs in a row and a teardown left nothing tagged.
 - The enforcer runs in vmcp. The live gate proves that it removes a stray
   `vmcp-` tap, restores a flushed `vmcp` table, and kills a machine whose
   jail gains a setuid file or whose cgroup gains a foreign process.
@@ -591,20 +611,27 @@ VERIFIED (see [Current State](#current-state)).
     `--service-uid` and `--service-gid` (default `65532`) select the
     service user. It refuses to start when an untagged or foreign resource
     has one of its names.
-  - `teardown` removes every resource with the install tag. It kills the
-    processes of owned cgroups with `cgroup.kill`, waits, and reports them
-    in `killed_processes`. It removes cgroups children first, unloads and
-    removes profile files, and removes module files, tmpfiles files,
-    configuration directories, and host links. It refuses an owned
-    directory that holds an untagged file. It never touches an untagged
-    resource, a resource of another install, Docker objects, OS packages,
-    or a loaded kernel module. It reports them in `conflicts` and `other_installs`. Then it
-    verifies from a fresh inventory that nothing tagged is left.
+  - `teardown` removes every resource with the install tag. First it
+    takes the lock of each owned cgroup. `vmcp serve` holds the `flock` of
+    its parent cgroup while it runs, so while the service runs, teardown
+    refuses, changes nothing, and reports `service_running: true`.
+    Otherwise it holds the locks until it ends, so that the service cannot
+    start meanwhile. It kills the processes of owned cgroups with
+    `cgroup.kill`, waits, and reports them in `killed_processes`. It
+    removes cgroups children first, unloads and removes profile files,
+    and removes module files, tmpfiles files, configuration directories,
+    host links, and nftables tables of the host network namespace. It
+    refuses an owned directory that holds an untagged file. It never
+    touches an untagged resource, a resource of another install, Docker
+    objects, OS packages, or a loaded kernel module. It reports them in
+    `conflicts` and `other_installs`. Then it verifies from a fresh
+    inventory that nothing tagged is left.
   - `status` prints the tagged inventory, the conflicts, the other
-    installs, and the receipt.
+    installs, `service_running`, and the receipt.
 - Run them as root from the vmcp image in a one-shot container with the
-  settings below. `--host-root` (default `/host`) holds the host `/etc`. The host network
-  namespace lets teardown find host links, `/sys/kernel/security` lets
+  settings below. `--host-root` (default `/host`) holds the host `/etc`.
+  The host network namespace lets teardown find host links and nftables
+  tables, `/sys/kernel/security` lets
   `apparmor_parser` load profiles, and `/lib/modules` lets `modprobe` load
   modules:
 
@@ -622,7 +649,9 @@ VERIFIED (see [Current State](#current-state)).
   ```
 
 - Stop the vmcp service of the install before `install` or `teardown`.
-  Teardown kills each process that it finds in an owned cgroup.
+  They refuse while it runs. A vmcp version without the lock is not
+  detected; teardown then kills each process that it finds in an owned
+  cgroup.
 - The log has one JSON line per step on stderr with `install_op` and
   `install_id`. Spans: `host.<command>`, `host.check`, `host.inventory`,
   `host.teardown`, `host.write.config`, `host.write.apparmor`,
@@ -630,7 +659,8 @@ VERIFIED (see [Current State](#current-state)).
   `host.verify`. `INFO`:
   `host command started`, `host resource written`, `host resource
   removed`, and `host command finished`. `WARN` codes: `host_conflict`,
-  `host_check_failed`, and `host_processes_killed`. `ERROR` codes:
+  `host_check_failed`, `host_service_running`, and `host_processes_killed`.
+  `ERROR` codes:
   `host_teardown_incomplete` and `host_<command>_failed`.
 - Not done (V4): `vmcp check`, `vmcp install`, `vmcp teardown`, `vmcp
   purge` (with an explicit confirmation flag), and `vmcp status` of the
@@ -666,8 +696,13 @@ VERIFIED (see [Current State](#current-state)).
     `vmcp:<install>:<machine>` on each tap and veth device. vmcp creates
     them in its container network namespace; teardown also scans the host
     network namespace;
-  - nftables: the one `vmcp` table, with the machine ID in each rule
-    comment.
+  - nftables: the one `vmcp` table with the comment `vmcp:<install-id>`,
+    and the machine tag in the comment of each set element. vmcp creates
+    it in its container network namespace; teardown also scans the host
+    network namespace;
+  - a running service: the `flock` of the parent cgroup, which `vmcp
+    serve` holds while it runs. A second vmcp process for the same install
+    refuses to start.
 - Inventory, teardown, and status find resources by these tags, never by
   the names that the current version writes. So teardown also removes what
   older versions created. vmcp deletes only tagged resources. It reports an
@@ -708,15 +743,25 @@ fails, except where the notes below say otherwise.
 - The jailer writes `+cpu`, `+memory`, and `+pids` into
   `cgroup.subtree_control` of each ancestor of its cgroup, also of the
   root. The profile allows that one root file.
+- The profile allows no `vsock` network family. Firecracker serves guest
+  vsock as Unix sockets in the jail (`v.sock` and `v.sock_<port>`), so no
+  process opens an `AF_VSOCK` socket. The gates passed without it.
 
 ### Posture contract
 After boot, every thread of a jailed Firecracker process must have:
 the machine UID and GID (`--uid-base` plus the machine slot, never the
 vmcp UID `65532`); zero effective, permitted, and ambient capabilities;
 `NoNewPrivs: 1`; `Seccomp: 2`; the jail chroot; PID 1 in its own PID
-namespace; and its machine cgroup with memory, CPU, and pids limits. Its jail
-root holds only the expected files, with no setuid or setgid file and no
-device node other than the ones the jailer creates.
+namespace; its own mount namespace; and its machine cgroup with memory,
+CPU, and pids limits. Its jail root holds only the expected files, with no
+setuid or setgid file and no device node other than the ones the jailer
+creates.
+
+vmcp cannot read `/proc/<pid>/ns/mnt` of another user without
+`CAP_SYS_PTRACE`. So the check compares mount tables from
+`/proc/<pid>/mountinfo`: a new mount namespace has copies of the mounts
+with new mount IDs, so a jailed process shares no mount ID with vmcp. A
+shared mount ID or an unreadable mount table is a violation.
 
 ### Enforcer
 - One enforcer goroutine audits every owned asset all the time. It reacts to
