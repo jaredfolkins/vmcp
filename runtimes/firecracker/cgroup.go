@@ -120,12 +120,15 @@ func postureViolations(cgroup string, uid int) (threads int, violations []string
 	if len(pids) == 0 {
 		return 0, []string{"no process in machine cgroup"}, nil
 	}
-	selfMnt, _ := os.Readlink("/proc/self/ns/mnt")
+	selfMounts, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return 0, nil, fmt.Errorf("read the vmcp mount table: %w", err)
+	}
 	want := strconv.Itoa(uid)
 	zero := "0000000000000000"
 	for _, pid := range pids {
-		if mnt, _ := os.Readlink(fmt.Sprintf("/proc/%d/ns/mnt", pid)); mnt == selfMnt {
-			violations = append(violations, fmt.Sprintf("pid %d shares the vmcp mount namespace", pid))
+		if v := mountViolation(pid, selfMounts); v != "" {
+			violations = append(violations, v)
 		}
 		tasks, err := os.ReadDir(fmt.Sprintf("/proc/%d/task", pid))
 		if err != nil {
@@ -150,6 +153,71 @@ func postureViolations(cgroup string, uid int) (threads int, violations []string
 		}
 	}
 	return threads, violations, nil
+}
+
+// mountViolation checks that pid has its own mount namespace. It compares
+// mount tables: vmcp cannot read /proc/<pid>/ns/mnt of another user
+// without CAP_SYS_PTRACE, but it can read /proc/<pid>/mountinfo. A process
+// that exited is not a violation.
+func mountViolation(pid int, self []byte) string {
+	v := ""
+	mounts, err := os.ReadFile(fmt.Sprintf("/proc/%d/mountinfo", pid))
+	if err == nil {
+		var shared bool
+		shared, err = sharesMounts(self, mounts)
+		if shared {
+			v = fmt.Sprintf("pid %d shares the vmcp mount namespace", pid)
+		}
+	}
+	if err != nil {
+		v = fmt.Sprintf("pid %d: the mount table is unreadable", pid)
+	}
+	if v != "" && exited(pid) {
+		return ""
+	}
+	return v
+}
+
+// sharesMounts reports whether a mount table has a mount of the vmcp mount
+// table. A new mount namespace holds copies of the mounts with new mount
+// IDs, and the jailer then drops the old root, so a jailed process shares
+// no mount ID with vmcp.
+func sharesMounts(self, other []byte) (bool, error) {
+	ours, theirs := mountIDs(self), mountIDs(other)
+	if len(ours) == 0 || len(theirs) == 0 {
+		return false, errors.New("a mount table is empty")
+	}
+	for id := range theirs {
+		if ours[id] {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// mountIDs returns the mount IDs, the first field of each mountinfo line.
+func mountIDs(mountinfo []byte) map[string]bool {
+	ids := map[string]bool{}
+	for _, line := range strings.Split(string(mountinfo), "\n") {
+		if f := strings.Fields(line); len(f) > 0 {
+			ids[f[0]] = true
+		}
+	}
+	return ids
+}
+
+// exited reports whether pid is gone or a zombie.
+func exited(pid int) bool {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return true
+	}
+	// The state follows the command name, which is in parentheses.
+	i := bytes.LastIndexByte(b, ')')
+	if i < 0 || i+2 >= len(b) {
+		return true
+	}
+	return b[i+2] == 'Z' || b[i+2] == 'X'
 }
 
 func allEqual(vs []string, want string) bool {

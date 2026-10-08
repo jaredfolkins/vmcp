@@ -1,0 +1,26 @@
+// Mount tables for the posture check. "self" is the vmcp mount table.
+// A jailed process has its own mount namespace: copies of the mounts with
+// new mount IDs, and only the jail root after the jailer drops the old
+// root.
+{
+  "self": "4079 3455 0:90 / / rw,relatime - overlay overlay rw\n4081 4079 0:192 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n4090 4079 0:31 / /sys/fs/cgroup rw,relatime - cgroup2 cgroup2 rw\n",
+  "cases": [
+    {
+      "name": "own namespace after pivot_root",
+      "other": "5120 5119 0:90 /var/lib/vmcp/jail/firecracker/vmcp-0123456789/root / rw,relatime - overlay overlay rw\n",
+      "shares": false,
+    },
+    {
+      "name": "the vmcp mount namespace",
+      "other": "4079 3455 0:90 / / rw,relatime - overlay overlay rw\n4081 4079 0:192 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n4090 4079 0:31 / /sys/fs/cgroup rw,relatime - cgroup2 cgroup2 rw\n",
+      "shares": true,
+    },
+    {
+      "name": "one mount of the vmcp table",
+      "other": "5120 5119 0:90 / / rw - overlay overlay rw\n4090 4079 0:31 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n",
+      "shares": true,
+    },
+    // An empty table proves nothing: the check reports it.
+    {"name": "empty table", "other": "", "want_error": "empty"},
+  ],
+}
