@@ -29,6 +29,7 @@ type inventory struct {
 	// no owned file.
 	orphanProfiles []string
 	moduleFiles    []ownedFile
+	tmpfilesFiles  []ownedFile
 	configDirs     []ownedConfigDir
 	links          []string
 	loaded         map[string]string
@@ -83,6 +84,9 @@ func (inv *inventory) ownedResources() []HostResource {
 	for _, f := range inv.moduleFiles {
 		out = append(out, HostResource{Kind: kindModulesLoad, Path: f.show})
 	}
+	for _, f := range inv.tmpfilesFiles {
+		out = append(out, HostResource{Kind: kindTmpfiles, Path: f.show})
+	}
 	for _, d := range inv.configDirs {
 		out = append(out, HostResource{Kind: kindConfigDir, Path: d.show})
 		for _, f := range d.present {
@@ -110,7 +114,7 @@ func (h *hostRun) inventory(ctx context.Context) (*inventory, error) {
 		span.End(err)
 		return nil, err
 	}
-	for _, scan := range []func(*inventory) error{h.scanCgroups, h.scanAppArmor, h.scanModules, h.scanConfig, h.scanLinks} {
+	for _, scan := range []func(*inventory) error{h.scanCgroups, h.scanAppArmor, h.scanModules, h.scanTmpfiles, h.scanConfig, h.scanLinks} {
 		if err := scan(inv); err != nil {
 			span.End(err)
 			return nil, err
@@ -239,25 +243,47 @@ func (h *hostRun) scanAppArmor(inv *inventory) error {
 
 // scanModules finds module load files by their owner line.
 func (h *hostRun) scanModules(inv *inventory) error {
-	dir := h.etc("modules-load.d")
-	files, err := regularFiles(dir)
+	files, err := h.scanOwnerLineFiles(inv, h.etc("modules-load.d"), kindModulesLoad)
 	if err != nil {
 		return fmt.Errorf("scan kernel module files: %w", err)
 	}
+	inv.moduleFiles = files
+	return nil
+}
+
+// scanTmpfiles finds systemd-tmpfiles files by their owner line.
+func (h *hostRun) scanTmpfiles(inv *inventory) error {
+	files, err := h.scanOwnerLineFiles(inv, h.etc("tmpfiles.d"), kindTmpfiles)
+	if err != nil {
+		return fmt.Errorf("scan tmpfiles files: %w", err)
+	}
+	inv.tmpfilesFiles = files
+	return nil
+}
+
+// scanOwnerLineFiles returns the files of dir that have the owner line of
+// this install. It adds a file of another install to the other installs,
+// and an untagged file named like vmcp to the conflicts.
+func (h *hostRun) scanOwnerLineFiles(inv *inventory, dir, kind string) ([]ownedFile, error) {
+	files, err := regularFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	var owned []ownedFile
 	for _, e := range files {
 		full := filepath.Join(dir, e.Name())
 		show := h.hostPath(full)
 		owner, ok := readOwnerLine(full)
 		switch {
 		case ok && owner == h.cfg.InstallID:
-			inv.moduleFiles = append(inv.moduleFiles, ownedFile{full: full, show: show})
+			owned = append(owned, ownedFile{full: full, show: show})
 		case ok:
-			inv.others = append(inv.others, HostResource{Kind: kindModulesLoad, Path: show, Owner: owner})
+			inv.others = append(inv.others, HostResource{Kind: kind, Path: show, Owner: owner})
 		case strings.HasPrefix(e.Name(), "vmcp"):
-			inv.conflict(HostResource{Kind: kindModulesLoad, Path: show, Detail: "untagged"})
+			inv.conflict(HostResource{Kind: kind, Path: show, Detail: "untagged"})
 		}
 	}
-	return nil
+	return owned, nil
 }
 
 // scanConfig finds configuration directories under /etc/vmcp by their

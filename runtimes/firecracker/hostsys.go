@@ -100,6 +100,12 @@ func (k kernelHost) tagCgroup(path, owner string) error {
 func (k kernelHost) makeCgroup(path string) error { return os.Mkdir(path, 0o755) }
 
 func (k kernelHost) enableControllers(path string, controllers []string) error {
+	return os.WriteFile(filepath.Join(path, "cgroup.subtree_control"), []byte(enableControllersArg(controllers)), 0o644)
+}
+
+// enableControllersArg is the cgroup.subtree_control write that enables
+// controllers, such as "+cpu +memory +pids".
+func enableControllersArg(controllers []string) string {
 	var b strings.Builder
 	for i, c := range controllers {
 		if i > 0 {
@@ -107,7 +113,7 @@ func (k kernelHost) enableControllers(path string, controllers []string) error {
 		}
 		b.WriteString("+" + c)
 	}
-	return os.WriteFile(filepath.Join(path, "cgroup.subtree_control"), []byte(b.String()), 0o644)
+	return b.String()
 }
 
 func (k kernelHost) chown(path string, uid, gid int) error { return os.Lchown(path, uid, gid) }

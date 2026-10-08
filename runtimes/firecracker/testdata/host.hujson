@@ -31,6 +31,13 @@
       "etc/modules-load.d/vmcp-live-gate.conf": "# vmcp-owner: live-gate\nkvm\nkvm_intel\ntun\n",
       "etc/modules-load.d/vmcp-old-name.conf": "# vmcp-owner: live-gate\ntun\n",
       "etc/modules-load.d/modules.conf": "loop\n",
+      "etc/tmpfiles.d/vmcp-live-gate.conf": "# vmcp-owner: live-gate\nd /sys/fs/cgroup/vmcp-live-gate 0755 root root - -\n",
+      // An older name of the same install.
+      "etc/tmpfiles.d/vmcp-cgroup-v0.conf": "# vmcp-owner: live-gate\nd /sys/fs/cgroup/vmcp-live-gate 0755 65532 65532 - -\n",
+      "etc/tmpfiles.d/vmcp-other-site.conf": "# vmcp-owner: other-site\nd /sys/fs/cgroup/vmcp-other-site 0755 root root - -\n",
+      // An untagged look-alike: teardown reports it and keeps it.
+      "etc/tmpfiles.d/vmcp-lookalike.conf": "d /sys/fs/cgroup/vmcp-lookalike 0755 root root - -\n",
+      "etc/tmpfiles.d/example.conf": "d /run/example 0755 root root - -\n",
       "etc/vmcp/live-gate/.vmcp-owner": "# vmcp-owner: live-gate\nseccomp.json\nreceipt.json\n",
       "etc/vmcp/live-gate/seccomp.json": "{}\n",
       "etc/vmcp/live-gate-old/.vmcp-owner": "# vmcp-owner: live-gate\nseccomp.json\n",
@@ -62,6 +69,8 @@
       "apparmor-file /etc/apparmor.d/vmcp-live-gate-v0",
       "modules-load /etc/modules-load.d/vmcp-live-gate.conf",
       "modules-load /etc/modules-load.d/vmcp-old-name.conf",
+      "tmpfiles /etc/tmpfiles.d/vmcp-live-gate.conf",
+      "tmpfiles /etc/tmpfiles.d/vmcp-cgroup-v0.conf",
       "config-file /etc/vmcp/live-gate/seccomp.json",
       "config-dir /etc/vmcp/live-gate",
       "config-file /etc/vmcp/live-gate-old/seccomp.json",
@@ -72,12 +81,14 @@
       "cgroup vmcp-lookalike",
       "apparmor-file /etc/apparmor.d/vmcp-foreign",
       "apparmor-file /etc/apparmor.d/vmcp-late-tag",
+      "tmpfiles /etc/tmpfiles.d/vmcp-lookalike.conf",
       "link vmcp-33333333",
     ],
     "want_other_installs": [
       "cgroup vmcp-other-site",
       "apparmor-file /etc/apparmor.d/vmcp-other-site",
       "config-dir /etc/vmcp/other-site",
+      "tmpfiles /etc/tmpfiles.d/vmcp-other-site.conf",
       "link vmcp-22222222",
     ],
     "want_kept_profiles": ["vmcp-other-site", "vmcp-foreign", "docker-default"],
@@ -96,20 +107,42 @@
   // refuses and writes nothing.
   "blocked_install": {
     "cgroups": [{"path": "vmcp-live-gate"}],
-    "files": {"etc/apparmor.d/vmcp-live-gate": "profile vmcp-live-gate {}\n"},
+    "files": {
+      "etc/apparmor.d/vmcp-live-gate": "profile vmcp-live-gate {}\n",
+      "etc/tmpfiles.d/vmcp-live-gate.conf": "d /sys/fs/cgroup/vmcp-live-gate 0755 root root - -\n",
+    },
     "loaded_profiles": {"vmcp-live-gate": "enforce"},
     "want_conflicts": [
       "cgroup vmcp-live-gate",
       "apparmor-file /etc/apparmor.d/vmcp-live-gate",
       "apparmor-profile vmcp-live-gate",
+      "tmpfiles /etc/tmpfiles.d/vmcp-live-gate.conf",
     ],
   },
+  // The lines of /etc/tmpfiles.d/vmcp-live-gate.conf after an install, in
+  // order. @CGROUP_ROOT@ is the cgroup root of the fake host. The
+  // directory stays owned by root until its delegated files have their
+  // owner; the glob line that gives it to the service user runs last.
+  "want_tmpfiles": [
+    "# vmcp-owner: live-gate",
+    "d @CGROUP_ROOT@/vmcp-live-gate 0755 root root - -",
+    "t @CGROUP_ROOT@/vmcp-live-gate - - - - trusted.vmcp.owner=live-gate",
+    "w @CGROUP_ROOT@/vmcp-live-gate/cgroup.subtree_control - - - - +cpu +memory +pids",
+    "z @CGROUP_ROOT@/vmcp-live-gate/cgroup.procs - 65532 65532 - -",
+    "z @CGROUP_ROOT@/vmcp-live-gate/cgroup.subtree_control - 65532 65532 - -",
+    "z @CGROUP_ROOT@/vmcp-live-gate/cgroup.threads - 65532 65532 - -",
+    "z @CGROUP_ROOT@/[v]mcp-live-gate - 65532 65532 - -",
+  ],
+  // Cgroup roots that a tmpfiles.d line cannot hold as they are: install
+  // refuses to write the boot file.
+  "unsafe_cgroup_roots": ["/sys/fs/cgroup x", "/sys/fs/%h", "/sys/fs/cgroup*", "sys/fs/cgroup", "/sys/fs/cgroup\\x20"],
   // The log of a host install: each line by message, with its level and
   // code.
   "install_log": [
     {"msg": "host command started", "level": "INFO"},
     {"msg": "host resource written", "level": "INFO"},
     {"msg": "span", "level": "DEBUG", "span": "host.write.cgroup"},
+    {"msg": "span", "level": "DEBUG", "span": "host.write.tmpfiles"},
     {"msg": "span", "level": "DEBUG", "span": "host.verify"},
     {"msg": "host command finished", "level": "INFO"},
   ],

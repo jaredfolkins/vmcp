@@ -67,6 +67,13 @@ func (h *hostRun) teardown(ctx context.Context) error {
 		}
 		h.removed(tctx, kindModulesLoad, f.show)
 	}
+	for _, f := range inv.tmpfilesFiles {
+		if err := os.Remove(f.full); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		h.removed(tctx, kindTmpfiles, f.show)
+	}
 	for _, d := range inv.configDirs {
 		if err := h.removeConfigDir(tctx, d); err != nil {
 			errs = append(errs, err)

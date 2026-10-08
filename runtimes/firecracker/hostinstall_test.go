@@ -55,7 +55,14 @@ type hostInput struct {
 	BlockedInstall     hostCase  `json:"blocked_install"`
 	InstallLog         []logLine `json:"install_log"`
 	BlockedLog         []logLine `json:"blocked_log"`
+	// WantTmpfiles are the lines of the tmpfiles.d file of an install, with
+	// the token cgroupRootToken for the cgroup root.
+	WantTmpfiles      []string `json:"want_tmpfiles"`
+	UnsafeCgroupRoots []string `json:"unsafe_cgroup_roots"`
 }
+
+// cgroupRootToken stands for the fake cgroup root in want_tmpfiles.
+const cgroupRootToken = "@CGROUP_ROOT@"
 
 // fakeHost is a host in temporary directories. Cgroups are directories
 // with the files that the kernel creates; tags, profiles, modules, and
@@ -411,6 +418,7 @@ func TestHostInstallIsIdempotent(t *testing.T) {
 		t.Fatalf("install: ok %t installed %t error %q", first.OK, first.Installed, first.Error)
 	}
 	checkInstalled(t, f, cfg)
+	checkTmpfiles(t, cfg, in.WantTmpfiles)
 
 	second := RunHostCommand(ctx, "install", cfg)
 	if !second.OK || !second.Installed {
@@ -435,7 +443,8 @@ func TestHostInstallIsIdempotent(t *testing.T) {
 	}
 	for _, p := range []string{filepath.Join(cfg.HostRoot, "etc", "vmcp"), filepath.Join(cfg.CgroupRoot, "vmcp-"+in.InstallID),
 		filepath.Join(cfg.HostRoot, "etc", "apparmor.d", "vmcp-"+in.InstallID),
-		filepath.Join(cfg.HostRoot, "etc", "modules-load.d", "vmcp-"+in.InstallID+".conf")} {
+		filepath.Join(cfg.HostRoot, "etc", "modules-load.d", "vmcp-"+in.InstallID+".conf"),
+		filepath.Join(cfg.HostRoot, "etc", "tmpfiles.d", "vmcp-"+in.InstallID+".conf")} {
 		if exists(p) {
 			t.Errorf("%s remains after teardown", p)
 		}
@@ -458,7 +467,7 @@ func checkInstalled(t *testing.T, f *fakeHost, cfg HostConfig) {
 	etc := filepath.Join(cfg.HostRoot, "etc")
 	header := ownerLine + id + "\n"
 	for _, p := range []string{filepath.Join(etc, "apparmor.d", "vmcp-"+id), filepath.Join(etc, "modules-load.d", "vmcp-"+id+".conf"),
-		filepath.Join(etc, "vmcp", id, ownerMarker)} {
+		filepath.Join(etc, "tmpfiles.d", "vmcp-"+id+".conf"), filepath.Join(etc, "vmcp", id, ownerMarker)} {
 		b, err := os.ReadFile(p)
 		if err != nil || !strings.HasPrefix(string(b), header) {
 			t.Errorf("%s does not start with the owner line %q: %v", p, header, err)
@@ -495,6 +504,60 @@ func checkInstalled(t *testing.T, f *fakeHost, cfg HostConfig) {
 	}
 	if mods := f.modules[len(f.modules)-3:]; !slices.Equal(mods, []string{"kvm", "kvm_intel", "tun"}) {
 		t.Errorf("loaded modules = %q, want kvm, kvm_intel, tun", mods)
+	}
+}
+
+// checkTmpfiles compares the tmpfiles.d file of an install with the
+// wanted lines. A difference means that the host would not create the
+// parent cgroup at boot as install creates it.
+func checkTmpfiles(t *testing.T, cfg HostConfig, want []string) {
+	t.Helper()
+	if len(want) == 0 {
+		t.Fatal("host input has no want_tmpfiles")
+	}
+	b, err := os.ReadFile(filepath.Join(cfg.HostRoot, "etc", "tmpfiles.d", "vmcp-"+cfg.InstallID+".conf"))
+	if err != nil {
+		t.Fatalf("read tmpfiles.d file: %v", err)
+	}
+	wantBody := strings.ReplaceAll(strings.Join(want, "\n")+"\n", cgroupRootToken, cfg.CgroupRoot)
+	if got := string(b); got != wantBody {
+		t.Errorf("tmpfiles.d file:\n got %q\nwant %q", got, wantBody)
+	}
+}
+
+// TestHostStatusNeedsTmpfiles proves that an install without its
+// tmpfiles.d file is not complete, because the parent cgroup would be gone
+// after the next host boot.
+func TestHostStatusNeedsTmpfiles(t *testing.T) {
+	in := readHostInput(t)
+	_, cfg := newFakeHost(t, in.InstallID, hostCase{}, nil)
+	ctx := context.Background()
+	if res := RunHostCommand(ctx, "install", cfg); !res.OK {
+		t.Fatalf("install: %s", res.Error)
+	}
+	if err := os.Remove(filepath.Join(cfg.HostRoot, "etc", "tmpfiles.d", "vmcp-"+in.InstallID+".conf")); err != nil {
+		t.Fatal(err)
+	}
+	status := RunHostCommand(ctx, "status", cfg)
+	if !status.OK || status.Installed {
+		t.Errorf("status without the tmpfiles.d file = ok %t installed %t, want ok and not installed", status.OK, status.Installed)
+	}
+}
+
+// TestHostTmpfilesRefusesUnsafePath proves that install does not write a
+// tmpfiles.d line for a cgroup path with whitespace, an escape, a
+// specifier, or a glob. systemd-tmpfiles would read such a line as another
+// path, or as a glob that changes the owner of other cgroups at boot.
+func TestHostTmpfilesRefusesUnsafePath(t *testing.T) {
+	in := readHostInput(t)
+	if len(in.UnsafeCgroupRoots) == 0 {
+		t.Fatal("host input has no unsafe_cgroup_roots")
+	}
+	for _, root := range in.UnsafeCgroupRoots {
+		h := &hostRun{cfg: HostConfig{InstallID: in.InstallID, CgroupRoot: root, ServiceUID: 65532, ServiceGID: 65532}}
+		if body, err := h.tmpfilesBody(); err == nil {
+			t.Errorf("tmpfilesBody with cgroup root %q = %q, want an error", root, body)
+		}
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -61,6 +62,7 @@ const (
 	kindAppArmorFile    = "apparmor-file"
 	kindAppArmorProfile = "apparmor-profile"
 	kindModulesLoad     = "modules-load"
+	kindTmpfiles        = "tmpfiles"
 	kindConfigDir       = "config-dir"
 	kindConfigFile      = "config-file"
 	kindLink            = "link"
@@ -220,6 +222,9 @@ func (h *hostRun) profileFile() string { return h.etc("apparmor.d", h.profileNam
 func (h *hostRun) modulesFile() string {
 	return h.etc("modules-load.d", "vmcp-"+h.cfg.InstallID+".conf")
 }
+func (h *hostRun) tmpfilesFile() string {
+	return h.etc("tmpfiles.d", "vmcp-"+h.cfg.InstallID+".conf")
+}
 func (h *hostRun) configDir() string { return h.etc("vmcp", h.cfg.InstallID) }
 
 // check verifies the host prerequisites. It makes no change.
@@ -360,6 +365,7 @@ func (h *hostRun) install(ctx context.Context) error {
 		{"host.write.config", h.writeConfig},
 		{"host.write.apparmor", h.writeAppArmor},
 		{"host.write.cgroup", h.writeCgroup},
+		{"host.write.tmpfiles", h.writeTmpfiles},
 		{"host.write.modules", h.writeModules},
 	}
 	for _, s := range steps {
@@ -399,6 +405,7 @@ func (h *hostRun) blockers(ctx context.Context) error {
 		{kindCgroup, h.parentCgroup(), h.parentCgroup()},
 		{kindAppArmorFile, h.profileFile(), h.hostPath(h.profileFile())},
 		{kindModulesLoad, h.modulesFile(), h.hostPath(h.modulesFile())},
+		{kindTmpfiles, h.tmpfilesFile(), h.hostPath(h.tmpfilesFile())},
 		{kindConfigDir, h.configDir(), h.hostPath(h.configDir())},
 	} {
 		if _, err := os.Lstat(b.path); err == nil {
@@ -509,6 +516,61 @@ func (h *hostRun) writeCgroup(ctx context.Context) error {
 	return nil
 }
 
+// writeTmpfiles writes the systemd-tmpfiles configuration that creates the
+// parent cgroup again at each host boot. The cgroup file system is empty
+// after a boot, and systemd-tmpfiles-setup.service applies the file before
+// Docker starts.
+func (h *hostRun) writeTmpfiles(ctx context.Context) error {
+	body, err := h.tmpfilesBody()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(h.etc("tmpfiles.d"), 0o755); err != nil {
+		return err
+	}
+	f := h.tmpfilesFile()
+	if err := writeFileExcl(f, []byte(body)); err != nil {
+		return err
+	}
+	h.written(ctx, kindTmpfiles, h.hostPath(f))
+	return nil
+}
+
+// tmpfilesPathRE is the form of a path that a tmpfiles.d line can hold
+// as it is: no whitespace, escape, specifier, or glob character.
+var tmpfilesPathRE = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
+
+// tmpfilesBody is the tmpfiles.d configuration that gives the parent cgroup
+// the state that writeCgroup gives it: the directory, the owner tag, the
+// controllers, and the delegated files.
+//
+// systemd-tmpfiles applies the lines of a directory before the lines of the
+// paths in it. It refuses to change a file owned by root in a directory
+// owned by another user, as an unsafe path. So the directory stays owned by
+// root until the delegated files have their owner. Its own owner line
+// comes last as a glob that matches only the directory, because
+// systemd-tmpfiles applies glob lines after all other lines.
+func (h *hostRun) tmpfilesBody() (string, error) {
+	p := h.parentCgroup()
+	if !tmpfilesPathRE.MatchString(p) {
+		return "", fmt.Errorf("parent cgroup path %q cannot be written to a tmpfiles.d line", p)
+	}
+	owner := fmt.Sprintf("%d %d", h.cfg.ServiceUID, h.cfg.ServiceGID)
+	var b strings.Builder
+	b.WriteString(h.ownerHeader())
+	fmt.Fprintf(&b, "d %s 0755 root root - -\n", p)
+	fmt.Fprintf(&b, "t %s - - - - %s=%s\n", p, ownerXattr, h.cfg.InstallID)
+	fmt.Fprintf(&b, "w %s - - - - %s\n", filepath.Join(p, "cgroup.subtree_control"), enableControllersArg(cgroupControllers))
+	for _, f := range delegatedFiles {
+		if f != "" {
+			fmt.Fprintf(&b, "z %s - %s - -\n", filepath.Join(p, f), owner)
+		}
+	}
+	dir, name := filepath.Split(p)
+	fmt.Fprintf(&b, "z %s[%s]%s - %s - -\n", dir, name[:1], name[1:], owner)
+	return b.String(), nil
+}
+
 // writeModules loads the KVM and TUN modules and keeps them across a host
 // boot.
 func (h *hostRun) writeModules(ctx context.Context) error {
@@ -570,6 +632,9 @@ func (h *hostRun) complete(inv *inventory) error {
 	}
 	if !slices.ContainsFunc(inv.moduleFiles, func(f ownedFile) bool { return f.full == h.modulesFile() }) {
 		missing = append(missing, "kernel module file")
+	}
+	if !slices.ContainsFunc(inv.tmpfilesFiles, func(f ownedFile) bool { return f.full == h.tmpfilesFile() }) {
+		missing = append(missing, "parent cgroup boot file")
 	}
 	if !slices.ContainsFunc(inv.configDirs, func(d ownedConfigDir) bool {
 		return d.full == h.configDir() && slices.Contains(d.present, seccompName)
