@@ -492,7 +492,7 @@ func (m *Machine) policyHash() string {
 	if m.net == nil {
 		return "no-network"
 	}
-	sum := sha256.Sum256([]byte(tableRuleset() + m.net.elements(m.tag)))
+	sum := sha256.Sum256([]byte(tableRuleset(m.r.cfg.InstallID) + m.net.elements(m.tag)))
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 

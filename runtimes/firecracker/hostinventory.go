@@ -32,9 +32,12 @@ type inventory struct {
 	tmpfilesFiles  []ownedFile
 	configDirs     []ownedConfigDir
 	links          []string
-	loaded         map[string]string
-	conflicts      []HostResource
-	others         []HostResource
+	nftTables      []hostTable
+	// locked are the owned cgroups whose lock a vmcp process holds.
+	locked    []string
+	loaded    map[string]string
+	conflicts []HostResource
+	others    []HostResource
 }
 
 type ownedCgroup struct {
@@ -96,6 +99,9 @@ func (inv *inventory) ownedResources() []HostResource {
 	for _, l := range inv.links {
 		out = append(out, HostResource{Kind: kindLink, Path: l})
 	}
+	for _, t := range inv.nftTables {
+		out = append(out, HostResource{Kind: kindNftTable, Path: t.Family + " " + t.Name})
+	}
 	return out
 }
 
@@ -114,7 +120,7 @@ func (h *hostRun) inventory(ctx context.Context) (*inventory, error) {
 		span.End(err)
 		return nil, err
 	}
-	for _, scan := range []func(*inventory) error{h.scanCgroups, h.scanAppArmor, h.scanModules, h.scanTmpfiles, h.scanConfig, h.scanLinks} {
+	for _, scan := range []func(*inventory) error{h.scanCgroups, h.scanLocks, h.scanAppArmor, h.scanModules, h.scanTmpfiles, h.scanConfig, h.scanLinks, h.scanNftTables} {
 		if err := scan(inv); err != nil {
 			span.End(err)
 			return nil, err
@@ -189,6 +195,24 @@ func (h *hostRun) scanCgroups(inv *inventory) error {
 	})
 	if err != nil {
 		return fmt.Errorf("scan cgroups: %w", err)
+	}
+	return nil
+}
+
+// scanLocks finds the owned cgroups whose lock a vmcp process holds. vmcp
+// serve holds the lock of its parent cgroup while it runs.
+func (h *hostRun) scanLocks(inv *inventory) error {
+	for _, c := range inv.cgroups {
+		release, err := h.sys.lockCgroup(c.full)
+		switch {
+		case errors.Is(err, errCgroupLocked):
+			inv.locked = append(inv.locked, c.full)
+		case errors.Is(err, fs.ErrNotExist):
+		case err != nil:
+			return err
+		default:
+			release()
+		}
 	}
 	return nil
 }
@@ -372,6 +396,30 @@ func (h *hostRun) scanLinks(inv *inventory) error {
 			inv.others = append(inv.others, HostResource{Kind: kindLink, Path: l.Name, Owner: owner})
 		case strings.HasPrefix(l.Name, TapPrefix):
 			inv.conflict(HostResource{Kind: kindLink, Path: l.Name, Detail: "untagged"})
+		}
+	}
+	return nil
+}
+
+// scanNftTables finds the nftables tables of the host network namespace by
+// their comment. vmcp creates its table in its own network namespace with
+// the comment tableTag; a table in the host namespace comes from a vmcp
+// that ran there.
+func (h *hostRun) scanNftTables(inv *inventory) error {
+	tables, err := h.sys.nftTables()
+	if err != nil {
+		return err
+	}
+	own := tableTag(h.cfg.InstallID)
+	for _, t := range tables {
+		show := t.Family + " " + t.Name
+		switch {
+		case t.Comment == own:
+			inv.nftTables = append(inv.nftTables, t)
+		case strings.HasPrefix(t.Comment, "vmcp:"):
+			inv.others = append(inv.others, HostResource{Kind: kindNftTable, Path: show, Owner: strings.TrimPrefix(t.Comment, "vmcp:")})
+		case strings.HasPrefix(t.Name, "vmcp"):
+			inv.conflict(HostResource{Kind: kindNftTable, Path: show, Detail: "untagged"})
 		}
 	}
 	return nil

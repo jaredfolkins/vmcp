@@ -66,12 +66,16 @@ type Runtime struct {
 	release     string
 	compat      string
 	enf         *enforcer
+	// parentLock holds the lock of the parent cgroup while vmcp runs. vmcp
+	// host teardown refuses to start while another process holds it.
+	parentLock *os.File
 }
 
 // New prepares the runtime: it checks the process capabilities, the baked
-// jailer, and the parent cgroup that vmcp host install delegated, installs
-// Firecracker, and replaces the vmcp nftables table. It starts the
-// enforcer, which runs until ctx ends.
+// jailer, and the parent cgroup that vmcp host install delegated, locks the
+// parent cgroup for the life of the process, installs Firecracker, and
+// replaces the vmcp nftables table. It starts the enforcer, which runs
+// until ctx ends.
 func New(ctx context.Context, cfg Config) (*Runtime, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -115,7 +119,13 @@ func New(ctx context.Context, cfg Config) (*Runtime, error) {
 	if err := r.checkCgroupParent(); err != nil {
 		return nil, err
 	}
-	if err := setupTable(ctx); err != nil {
+	if r.parentLock, err = lockCgroup(r.cgroupParent()); err != nil {
+		if errors.Is(err, errCgroupLocked) {
+			return nil, fmt.Errorf("another vmcp process serves install %s: it holds the lock of %s", cfg.InstallID, r.cgroupParent())
+		}
+		return nil, err
+	}
+	if err := setupTable(ctx, cfg.InstallID); err != nil {
 		return nil, fmt.Errorf("set up nftables table: %w", err)
 	}
 	r.enf = newEnforcer(r)

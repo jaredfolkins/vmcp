@@ -464,7 +464,7 @@ func protoName(v any) (string, bool) {
 
 // restoreTable recreates the vmcp table and the elements of live machines.
 func (e *enforcer) restoreTable(ctx context.Context) {
-	if err := setupTable(ctx); err != nil {
+	if err := setupTable(ctx, e.r.cfg.InstallID); err != nil {
 		return
 	}
 	e.mu.Lock()

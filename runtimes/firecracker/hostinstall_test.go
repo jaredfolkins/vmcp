@@ -30,10 +30,13 @@ type hostCase struct {
 		Path  string `json:"path"`
 		Owner string `json:"owner"`
 		Procs string `json:"procs"`
+		// Locked means that a vmcp process holds the lock of the cgroup.
+		Locked bool `json:"locked"`
 	} `json:"cgroups"`
 	Files               map[string]string `json:"files"`
 	LoadedProfiles      map[string]string `json:"loaded_profiles"`
 	Links               []hostLink        `json:"links"`
+	NftTables           []hostTable       `json:"nft_tables"`
 	WantRemoved         []string          `json:"want_removed"`
 	WantKilledProcesses int               `json:"want_killed_processes"`
 	WantConflicts       []string          `json:"want_conflicts"`
@@ -49,12 +52,17 @@ type logLine struct {
 }
 
 type hostInput struct {
-	InstallID          string    `json:"install_id"`
-	Teardown           hostCase  `json:"teardown"`
-	UntaggedConfigFile hostCase  `json:"untagged_config_file"`
-	BlockedInstall     hostCase  `json:"blocked_install"`
-	InstallLog         []logLine `json:"install_log"`
-	BlockedLog         []logLine `json:"blocked_log"`
+	InstallID          string   `json:"install_id"`
+	Teardown           hostCase `json:"teardown"`
+	UntaggedConfigFile hostCase `json:"untagged_config_file"`
+	BlockedInstall     hostCase `json:"blocked_install"`
+	ServiceRunning     hostCase `json:"service_running"`
+	NftRuleset         struct {
+		Ruleset string      `json:"ruleset"`
+		Want    []hostTable `json:"want"`
+	} `json:"nft_ruleset"`
+	InstallLog []logLine `json:"install_log"`
+	BlockedLog []logLine `json:"blocked_log"`
 	// WantTmpfiles are the lines of the tmpfiles.d file of an install, with
 	// the token cgroupRootToken for the cgroup root.
 	WantTmpfiles      []string `json:"want_tmpfiles"`
@@ -75,6 +83,8 @@ type fakeHost struct {
 	profiles map[string]string
 	modules  []string
 	linkList []hostLink
+	tables   []hostTable
+	locked   map[string]bool
 	kills    []string
 }
 
@@ -211,6 +221,23 @@ func (f *fakeHost) deleteLink(name string) error {
 	return nil
 }
 
+func (f *fakeHost) lockCgroup(path string) (func(), error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	if f.locked[path] {
+		return nil, errCgroupLocked
+	}
+	return func() {}, nil
+}
+
+func (f *fakeHost) nftTables() ([]hostTable, error) { return slices.Clone(f.tables), nil }
+
+func (f *fakeHost) deleteNftTable(family, name string) error {
+	f.tables = slices.DeleteFunc(f.tables, func(t hostTable) bool { return t.Family == family && t.Name == name })
+	return nil
+}
+
 func maps(m map[string]string) map[string]string {
 	out := make(map[string]string, len(m))
 	for k, v := range m {
@@ -225,7 +252,8 @@ func newFakeHost(t *testing.T, id string, tc hostCase, log *slog.Logger) (*fakeH
 	t.Helper()
 	dir := t.TempDir()
 	f := &fakeHost{t: t, cgroups: filepath.Join(dir, "cgroup"), tags: map[string]string{}, owners: map[string][2]int{},
-		profiles: maps(tc.LoadedProfiles), linkList: slices.Clone(tc.Links)}
+		profiles: maps(tc.LoadedProfiles), linkList: slices.Clone(tc.Links), tables: slices.Clone(tc.NftTables),
+		locked: map[string]bool{}}
 	write := func(p, body string) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -253,6 +281,7 @@ func newFakeHost(t *testing.T, id string, tc hostCase, log *slog.Logger) (*fakeH
 		if c.Owner != "" {
 			f.tags[p] = c.Owner
 		}
+		f.locked[p] = c.Locked
 	}
 	for name, body := range tc.Files {
 		write(filepath.Join(dir, "host", name), body)
@@ -343,7 +372,7 @@ func TestHostTeardownRemovesOnlyTaggedResources(t *testing.T) {
 		removed := false
 		for _, r := range tc.WantRemoved {
 			kind, path, _ := strings.Cut(r, " ")
-			if kind != kindCgroup && kind != kindLink && strings.HasPrefix("/"+name, path) {
+			if kind != kindCgroup && kind != kindLink && kind != kindNftTable && strings.HasPrefix("/"+name, path) {
 				removed = true
 			}
 		}
@@ -378,6 +407,12 @@ func TestHostTeardownRemovesOnlyTaggedResources(t *testing.T) {
 		gone := !slices.ContainsFunc(f.linkList, func(h hostLink) bool { return h.Name == l.Name })
 		if want := slices.Contains(tc.WantRemoved, "link "+l.Name); gone != want {
 			t.Errorf("link %s removed = %t, want %t", l.Name, gone, want)
+		}
+	}
+	for _, tb := range tc.NftTables {
+		gone := !slices.Contains(f.tables, tb)
+		if want := slices.Contains(tc.WantRemoved, kindNftTable+" "+tb.Family+" "+tb.Name); gone != want {
+			t.Errorf("nft table %s %s removed = %t, want %t", tb.Family, tb.Name, gone, want)
 		}
 	}
 	if exists(filepath.Join(cfg.HostRoot, "etc", "vmcp", in.InstallID)) {
@@ -631,4 +666,55 @@ func TestHostCommandLog(t *testing.T) {
 // traceHandler is the vmcp log handler at DEBUG.
 func traceHandler(w io.Writer) slog.Handler {
 	return trace.NewHandler(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+// TestHostRefusesWhileServiceRuns proves that teardown and install refuse
+// to start while a vmcp process holds the lock of an owned cgroup, change
+// nothing, and report the running service. Without the lock, teardown
+// removed the parent cgroup and the profile of a running service whose
+// machine cgroups were empty.
+func TestHostRefusesWhileServiceRuns(t *testing.T) {
+	in := readHostInput(t)
+	tc := in.ServiceRunning
+	if len(tc.Cgroups) == 0 {
+		t.Fatal("host input has no service_running case")
+	}
+	for _, command := range []string{"teardown", "install"} {
+		f, cfg := newFakeHost(t, in.InstallID, tc, nil)
+		res := RunHostCommand(context.Background(), command, cfg)
+		if res.OK || !res.ServiceRunning || len(res.Removed) != 0 || len(res.Written) != 0 || len(res.Owned) == 0 {
+			t.Errorf("%s: ok %t service_running %t removed %d written %d owned %d, want a refusal with no change that reports the owned resources",
+				command, res.OK, res.ServiceRunning, len(res.Removed), len(res.Written), len(res.Owned))
+		}
+		for name, body := range tc.Files {
+			if got, err := os.ReadFile(filepath.Join(cfg.HostRoot, name)); err != nil || string(got) != body {
+				t.Errorf("%s: file /%s changed or is gone: %v", command, name, err)
+			}
+		}
+		for _, c := range tc.Cgroups {
+			if !exists(filepath.Join(cfg.CgroupRoot, c.Path)) {
+				t.Errorf("%s: cgroup %s is gone", command, c.Path)
+			}
+		}
+		if len(f.profiles) != len(tc.LoadedProfiles) {
+			t.Errorf("%s: loaded profiles = %v, want %v", command, f.profiles, tc.LoadedProfiles)
+		}
+	}
+	_, cfg := newFakeHost(t, in.InstallID, tc, nil)
+	if st := RunHostCommand(context.Background(), "status", cfg); !st.OK || !st.ServiceRunning {
+		t.Errorf("status: ok %t service_running %t, want ok and a running service", st.OK, st.ServiceRunning)
+	}
+}
+
+// TestParseNftTables proves that the table comment comes from the table
+// block and not from a set, chain, or rule in it. A wrong parse would tag
+// or miss the vmcp table of an install.
+func TestParseNftTables(t *testing.T) {
+	in := readHostInput(t)
+	if in.NftRuleset.Ruleset == "" {
+		t.Fatal("host input has no nft_ruleset")
+	}
+	if got := parseNftTables([]byte(in.NftRuleset.Ruleset)); !slices.Equal(got, in.NftRuleset.Want) {
+		t.Errorf("parseNftTables() = %+v, want %+v", got, in.NftRuleset.Want)
+	}
 }

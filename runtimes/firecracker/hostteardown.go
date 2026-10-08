@@ -18,14 +18,24 @@ import (
 // teardown removes every host resource that carries the install tag, from
 // any vmcp version, and verifies from a fresh inventory that none is left.
 // It never touches an untagged resource or a resource of another install;
-// it reports them. Stop the vmcp service of the install first: teardown
-// kills every process that it finds in an owned cgroup.
+// it reports them. It refuses to start while the vmcp service of the
+// install runs, and it holds the lock of every owned cgroup until it ends,
+// so that the service cannot start meanwhile. It kills every process that
+// it finds in an owned cgroup.
 func (h *hostRun) teardown(ctx context.Context) error {
 	inv, err := h.inventory(ctx)
 	if err != nil {
 		return err
 	}
+	// A refused teardown reports what it found.
+	h.report(inv)
 	tctx, span := trace.Start(ctx, h.log, "host.teardown")
+	release, err := h.lockOwned(tctx, inv)
+	if err != nil {
+		span.End(err)
+		return err
+	}
+	defer release()
 	var errs []error
 	for _, l := range inv.links {
 		if err := h.sys.deleteLink(l); err != nil {
@@ -33,6 +43,13 @@ func (h *hostRun) teardown(ctx context.Context) error {
 			continue
 		}
 		h.removed(tctx, kindLink, l)
+	}
+	for _, t := range inv.nftTables {
+		if err := h.sys.deleteNftTable(t.Family, t.Name); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		h.removed(tctx, kindNftTable, t.Family+" "+t.Name)
 	}
 	for _, c := range inv.cgroups {
 		if c.blocked {
@@ -103,6 +120,40 @@ func (h *hostRun) teardown(ctx context.Context) error {
 	err = errors.Join(errs...)
 	span.End(err, "removed", len(h.res.Removed), "killed_processes", h.res.KilledProcesses)
 	return err
+}
+
+// lockOwned takes the lock of every owned cgroup. When a vmcp process holds
+// one, it releases the others and refuses: the service of the install
+// runs.
+func (h *hostRun) lockOwned(ctx context.Context, inv *inventory) (func(), error) {
+	var releases []func()
+	release := func() {
+		for _, r := range releases {
+			r()
+		}
+	}
+	var busy []string
+	for _, c := range inv.cgroups {
+		r, err := h.sys.lockCgroup(c.full)
+		switch {
+		case errors.Is(err, errCgroupLocked):
+			busy = append(busy, c.full)
+			h.log.WarnContext(ctx, "host vmcp service runs", "code", "host_service_running", "cgroup", c.full)
+		case errors.Is(err, fs.ErrNotExist):
+		case err != nil:
+			release()
+			return nil, err
+		default:
+			releases = append(releases, r)
+		}
+	}
+	if len(busy) > 0 {
+		release()
+		h.res.ServiceRunning = true
+		return nil, fmt.Errorf("the vmcp service of install %s runs: a process holds the lock of %s; stop the service first",
+			h.cfg.InstallID, strings.Join(busy, ", "))
+	}
+	return release, nil
 }
 
 func (h *hostRun) removed(ctx context.Context, kind, path string) {

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/jaredfolkins/vmcp/api"
 	"github.com/jaredfolkins/vmcp/internal/trace"
 )
@@ -21,6 +23,29 @@ import (
 // cgroupControllers are the controllers that the jailer limits. vmcp host
 // install enables them in the parent cgroup.
 var cgroupControllers = []string{"cpu", "memory", "pids"}
+
+// errCgroupLocked means that another process holds the lock of a cgroup.
+var errCgroupLocked = errors.New("the cgroup is locked by another process")
+
+// lockCgroup takes the exclusive lock of a cgroup directory without
+// waiting. The lock lasts until the returned file is closed or the process
+// exits. vmcp serve holds the lock of its parent cgroup, so vmcp host
+// teardown knows that the service runs. It returns errCgroupLocked when
+// another process holds the lock.
+func lockCgroup(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open cgroup %s: %w", path, err)
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return nil, errCgroupLocked
+		}
+		return nil, fmt.Errorf("lock cgroup %s: %w", path, err)
+	}
+	return f, nil
+}
 
 // killCgroup kills every process in the cgroup and waits until it is
 // empty. A missing cgroup is not an error.

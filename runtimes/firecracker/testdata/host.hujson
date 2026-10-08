@@ -59,8 +59,20 @@
       {"ifname": "vmcp-33333333", "ifalias": ""},
       {"ifname": "eth0", "ifalias": ""},
     ],
+    // Tables of the host network namespace, from a vmcp that ran there.
+    "nft_tables": [
+      {"family": "inet", "name": "vmcp", "comment": "vmcp:live-gate"},
+      // An older name of the same install.
+      {"family": "inet", "name": "vmcp-old", "comment": "vmcp:live-gate"},
+      {"family": "inet", "name": "vmcp-other", "comment": "vmcp:other-site"},
+      // A table of an older version without an install tag: reported, kept.
+      {"family": "inet", "name": "vmcp-untagged", "comment": "vmcp owned"},
+      {"family": "ip", "name": "filter", "comment": ""},
+    ],
     "want_removed": [
       "link vmcp-11111111",
+      "nft-table inet vmcp",
+      "nft-table inet vmcp-old",
       "cgroup vmcp-live-gate",
       "cgroup system.slice/vmcp-old-parent",
       "apparmor-profile vmcp-live-gate",
@@ -78,6 +90,7 @@
     ],
     "want_killed_processes": 1,
     "want_conflicts": [
+      "nft-table inet vmcp-untagged",
       "cgroup vmcp-lookalike",
       "apparmor-file /etc/apparmor.d/vmcp-foreign",
       "apparmor-file /etc/apparmor.d/vmcp-late-tag",
@@ -90,8 +103,32 @@
       "config-dir /etc/vmcp/other-site",
       "tmpfiles /etc/tmpfiles.d/vmcp-other-site.conf",
       "link vmcp-22222222",
+      "nft-table inet vmcp-other",
     ],
     "want_kept_profiles": ["vmcp-other-site", "vmcp-foreign", "docker-default"],
+  },
+  // The vmcp service of the install runs: it holds the lock of its parent
+  // cgroup, which has no machine and no process. Install and teardown
+  // refuse and change nothing; status reports the running service.
+  "service_running": {
+    "cgroups": [{"path": "vmcp-live-gate", "owner": "live-gate", "locked": true}],
+    "files": {
+      "etc/apparmor.d/vmcp-live-gate": "# vmcp-owner: live-gate\nprofile vmcp-live-gate {}\n",
+      "etc/modules-load.d/vmcp-live-gate.conf": "# vmcp-owner: live-gate\nkvm\nkvm_intel\ntun\n",
+      "etc/vmcp/live-gate/.vmcp-owner": "# vmcp-owner: live-gate\nseccomp.json\nreceipt.json\n",
+      "etc/vmcp/live-gate/seccomp.json": "{}\n",
+    },
+    "loaded_profiles": {"vmcp-live-gate": "enforce"},
+  },
+  // A text ruleset as nft list ruleset prints it. Only the line with one
+  // tab of indent in a table block is the table comment.
+  "nft_ruleset": {
+    "ruleset": "table inet vmcp {\n\tcomment \"vmcp:live-gate\"\n\tset guest_allow {\n\t\ttype ifname . ipv4_addr\n\t\tcomment \"vmcp guest broker access\"\n\t}\n\n\tchain input {\n\t\tiifname \"vmcp-*\" drop comment \"x\"\n\t}\n}\ntable ip filter {\n\tchain forward {\n\t\tcounter comment \"vmcp:live-gate\"\n\t}\n}\ntable inet vmcp-old {\n\tcomment \"vmcp:live-gate\"\n}\n",
+    "want": [
+      {"family": "inet", "name": "vmcp", "comment": "vmcp:live-gate"},
+      {"family": "ip", "name": "filter", "comment": ""},
+      {"family": "inet", "name": "vmcp-old", "comment": "vmcp:live-gate"},
+    ],
   },
   // A file that the marker of an owned directory does not name. Teardown
   // refuses the directory and leaves it as it is.

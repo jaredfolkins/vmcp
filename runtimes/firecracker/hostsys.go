@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -38,6 +39,10 @@ type hostSystem interface {
 	killCgroup(path string) error
 	// removeCgroup removes one empty cgroup without children.
 	removeCgroup(path string) error
+	// lockCgroup takes the lock of a cgroup that vmcp serve holds while it
+	// runs. It returns errCgroupLocked when another process holds it. The
+	// returned function releases the lock.
+	lockCgroup(path string) (func(), error)
 
 	// loadedProfiles returns the mode of each loaded AppArmor profile.
 	loadedProfiles() (map[string]string, error)
@@ -53,6 +58,18 @@ type hostSystem interface {
 	// links lists the links of the host network namespace.
 	links() ([]hostLink, error)
 	deleteLink(name string) error
+
+	// nftTables lists the nftables tables of the host network namespace
+	// with their comments.
+	nftTables() ([]hostTable, error)
+	deleteNftTable(family, name string) error
+}
+
+// hostTable is an nftables table and its comment.
+type hostTable struct {
+	Family  string `json:"family"`
+	Name    string `json:"name"`
+	Comment string `json:"comment"`
 }
 
 // hostLink is a link and its ifalias.
@@ -142,6 +159,14 @@ func (k kernelHost) killCgroup(path string) error {
 
 func (k kernelHost) removeCgroup(path string) error { return os.Remove(path) }
 
+func (k kernelHost) lockCgroup(path string) (func(), error) {
+	f, err := lockCgroup(path)
+	if err != nil {
+		return nil, err
+	}
+	return func() { _ = f.Close() }, nil
+}
+
 func (k kernelHost) loadedProfiles() (map[string]string, error) {
 	b, err := os.ReadFile(filepath.Join(k.securityFS, "apparmor", "profiles"))
 	if err != nil {
@@ -206,6 +231,43 @@ func (k kernelHost) links() ([]hostLink, error) {
 func (k kernelHost) deleteLink(name string) error {
 	_, err := k.tool(nil, "ip", "link", "del", "dev", name)
 	return err
+}
+
+func (k kernelHost) nftTables() ([]hostTable, error) {
+	// The JSON listing of nft 1.0.6 has no table comment, so read the
+	// text ruleset.
+	out, err := k.tool(nil, "nft", "list", "ruleset")
+	if err != nil {
+		return nil, err
+	}
+	return parseNftTables(out), nil
+}
+
+func (k kernelHost) deleteNftTable(family, name string) error {
+	_, err := k.tool(nil, "nft", "delete", "table", family, name)
+	return err
+}
+
+var (
+	nftTableLineRE    = regexp.MustCompile(`^table (\S+) (\S+) \{$`)
+	nftTableCommentRE = regexp.MustCompile(`^\tcomment "([^"]*)"$`)
+)
+
+// parseNftTables reads the tables of a text ruleset. The comment of a
+// table is the first line in its block with one tab of indent; the
+// comments of sets, chains, and rules have more indent.
+func parseNftTables(ruleset []byte) []hostTable {
+	var out []hostTable
+	for _, line := range strings.Split(string(ruleset), "\n") {
+		if m := nftTableLineRE.FindStringSubmatch(line); m != nil {
+			out = append(out, hostTable{Family: m[1], Name: m[2]})
+			continue
+		}
+		if m := nftTableCommentRE.FindStringSubmatch(line); m != nil && len(out) > 0 && out[len(out)-1].Comment == "" {
+			out[len(out)-1].Comment = m[1]
+		}
+	}
+	return out
 }
 
 // tool runs a host tool as root with a fixed environment and no shell.

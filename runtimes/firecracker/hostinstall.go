@@ -66,6 +66,7 @@ const (
 	kindConfigDir       = "config-dir"
 	kindConfigFile      = "config-file"
 	kindLink            = "link"
+	kindNftTable        = "nft-table"
 )
 
 // HostConfig selects the host and the identity of one install. The host
@@ -121,8 +122,11 @@ type HostResult struct {
 	OK        bool   `json:"ok"`
 	Error     string `json:"error,omitempty"`
 	// Installed is true when every resource of a complete install exists.
-	Installed bool        `json:"installed"`
-	Checks    []api.Check `json:"checks,omitempty"`
+	Installed bool `json:"installed"`
+	// ServiceRunning is true when a vmcp process holds the lock of an
+	// owned cgroup. Install and teardown refuse to start then.
+	ServiceRunning bool        `json:"service_running"`
+	Checks         []api.Check `json:"checks,omitempty"`
 	// KilledProcesses counts the processes that teardown found in owned
 	// cgroups and killed.
 	KilledProcesses int            `json:"killed_processes"`
@@ -329,6 +333,7 @@ func (h *hostRun) status(ctx context.Context) error {
 func (h *hostRun) report(inv *inventory) {
 	h.res.Owned = inv.ownedResources()
 	h.res.OtherInstalls = inv.others
+	h.res.ServiceRunning = len(inv.locked) > 0
 }
 
 func (h *hostRun) readReceipt(inv *inventory) *HostReceipt {

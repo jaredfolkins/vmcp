@@ -84,11 +84,16 @@ func shortID(id string) string {
 	return s
 }
 
-// tableRuleset is the vmcp nftables table. Each tap may reach only the
-// elements of guest_allow. Nothing is forwarded to or from a tap.
-func tableRuleset() string {
+// tableTag is the comment of the vmcp nftables table of an install. vmcp
+// host teardown finds a table by it.
+func tableTag(installID string) string { return "vmcp:" + installID }
+
+// tableRuleset is the vmcp nftables table of an install. Each tap may
+// reach only the elements of guest_allow. Nothing is forwarded to or from
+// a tap.
+func tableRuleset(installID string) string {
 	return fmt.Sprintf(`table inet %[1]s {
-	comment "vmcp owned"
+	comment "%[3]s"
 	set guest_allow {
 		type ifname . ipv4_addr . ipv4_addr . inet_proto . inet_service
 		comment "vmcp guest broker access"
@@ -104,13 +109,13 @@ func tableRuleset() string {
 		oifname "%[2]s*" drop
 	}
 }
-`, nftTable, TapPrefix)
+`, nftTable, TapPrefix, tableTag(installID))
 }
 
-// setupTable replaces the vmcp table with a fresh one.
-func setupTable(ctx context.Context) error {
+// setupTable replaces the vmcp table with a fresh one for the install.
+func setupTable(ctx context.Context, installID string) error {
 	_ = run(ctx, nil, "nft", "delete", "table", "inet", nftTable)
-	return run(ctx, []byte(tableRuleset()), "nft", "-f", "-")
+	return run(ctx, []byte(tableRuleset(installID)), "nft", "-f", "-")
 }
 
 // addTap creates the tap for uid and gid, tags it, and allows its brokers.

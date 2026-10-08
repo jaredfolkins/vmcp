@@ -35,7 +35,10 @@ profile vmcp-@INSTALL_ID@ flags=(attach_disconnected,mediate_deleted) {
   network inet6 dgram,
   # ip, nft, and the enforcer watches.
   network netlink raw,
-  # Guest vsock and the Firecracker API are Unix sockets on the host.
+  # Guest vsock and the Firecracker API are Unix sockets on the host:
+  # Firecracker serves guest vsock on v.sock and v.sock_<port> in the jail.
+  # So no process opens an AF_VSOCK socket, and the profile allows no
+  # vsock family.
   network unix stream,
   network unix dgram,
 
@@ -90,7 +93,9 @@ profile vmcp-@INSTALL_ID@ flags=(attach_disconnected,mediate_deleted) {
   /sys/fs/cgroup/cgroup.controllers r,
   /sys/fs/cgroup/cgroup.subtree_control rw,
   /sys/fs/cgroup/**/cpu.max r,
-  /sys/fs/cgroup/vmcp-@INSTALL_ID@/ rw,
+  # vmcp holds the lock of the parent cgroup while it runs; vmcp host
+  # teardown refuses to start while it is held.
+  /sys/fs/cgroup/vmcp-@INSTALL_ID@/ rwk,
   /sys/fs/cgroup/vmcp-@INSTALL_ID@/** rw,
 
   @{PROC}/ r,
