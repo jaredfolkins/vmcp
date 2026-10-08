@@ -1,0 +1,18 @@
+// Inputs for the exit test of the mount namespace check. On Linux 6.1 the
+// enforcer read the mount table of an exiting Firecracker process, which had
+// already given up its namespaces, and killed the machine. PF_EXITING is
+// 0x4 in the flags field (the ninth field).
+{
+  "cases": [
+    {"name": "running", "stat": "574 (firecracker) R 1 574 574 0 -1 4194560 10 0 0 0 1 2 0 0 20 0 3 0 100 0 0", "want": false},
+    {"name": "sleeping", "stat": "574 (firecracker) S 1 574 574 0 -1 4194560 10 0 0 0 1 2 0 0 20 0 3 0 100 0 0", "want": false},
+    {"name": "running and exiting", "stat": "574 (firecracker) R 1 574 574 0 -1 4194564 10 0 0 0 1 2 0 0 20 0 3 0 100 0 0", "want": true},
+    {"name": "disk sleep and exiting", "stat": "574 (firecracker) D 1 574 574 0 -1 4194564 10 0 0 0 1 2 0 0 20 0 3 0 100 0 0", "want": true},
+    {"name": "zombie", "stat": "574 (firecracker) Z 1 574 574 0 -1 4227332 10 0 0 0 1 2 0 0 20 0 3 0 100 0 0", "want": true},
+    {"name": "dead", "stat": "574 (firecracker) X 1 574 574 0 -1 4227332 10 0 0 0 1 2 0 0 20 0 3 0 100 0 0", "want": true},
+    // A guest cannot fake an exit with its command name: the state follows
+    // the last ')'.
+    {"name": "name that holds a zombie state", "stat": "574 (a) Z (b) S 1 574 574 0 -1 4194560 10 0 0 0 1 2 0 0 20 0 3 0 100 0 0", "want": false},
+    {"name": "no name field", "stat": "574 firecracker R 1", "want": true}
+  ]
+}

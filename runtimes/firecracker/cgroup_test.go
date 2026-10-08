@@ -143,3 +143,31 @@ func TestReadProcIdentity(t *testing.T) {
 		t.Errorf("own process: %+v, %v; want a user process", self, err)
 	}
 }
+
+var procExitConfig = flag.String("vmcp-proc-exit-config", "testdata/proc-exit.hujson", "HuJSON file with process exit cases")
+
+// TestStatExited proves that the mount namespace check treats an exiting
+// task as exited. On Linux 6.1 the enforcer read the mount table of an
+// exiting Firecracker process at the end of a job, could not read it, and
+// killed the machine. A running or sleeping task stays checked, and a
+// command name cannot fake an exit.
+func TestStatExited(t *testing.T) {
+	var in struct {
+		Cases []struct {
+			Name string `json:"name"`
+			Stat string `json:"stat"`
+			Want bool   `json:"want"`
+		} `json:"cases"`
+	}
+	readHuJSON(t, *procExitConfig, &in)
+	if len(in.Cases) == 0 {
+		t.Fatal("proc exit config has no cases")
+	}
+	for _, tc := range in.Cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			if got := statExited(tc.Stat); got != tc.Want {
+				t.Errorf("statExited(%q) = %v, want %v", tc.Stat, got, tc.Want)
+			}
+		})
+	}
+}

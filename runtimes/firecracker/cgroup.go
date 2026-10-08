@@ -95,6 +95,12 @@ func cgroupPIDs(path string) ([]int, error) {
 // space cannot set it.
 const pfKthread = 0x00200000
 
+// pfExiting is PF_EXITING in the flags field of /proc/<pid>/stat. The kernel
+// sets it when a task starts to exit, before the task gives up its
+// namespaces. User space cannot set it, and the task does not return to user
+// space.
+const pfExiting = 0x00000004
+
 // kvmWorkerPrefix names the kernel thread that KVM creates for each VM on
 // Linux 6.1 to recover NX huge pages. KVM attaches the thread to the cgroup
 // of the VM owner, so it appears next to Firecracker in the machine cgroup.
@@ -303,7 +309,7 @@ func postureViolations(cgroup string, uid int) (threads int, violations []string
 // mountViolation checks that pid has its own mount namespace. It compares
 // mount tables: vmcp cannot read /proc/<pid>/ns/mnt of another user
 // without CAP_SYS_PTRACE, but it can read /proc/<pid>/mountinfo. A process
-// that exited is not a violation.
+// that exited or is exiting is not a violation.
 func mountViolation(pid int, self []byte) string {
 	v := ""
 	mounts, err := os.ReadFile(fmt.Sprintf("/proc/%d/mountinfo", pid))
@@ -351,18 +357,31 @@ func mountIDs(mountinfo []byte) map[string]bool {
 	return ids
 }
 
-// exited reports whether pid is gone or a zombie.
+// exited reports whether pid is gone, a zombie, or exiting.
 func exited(pid int) bool {
 	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
 		return true
 	}
+	return statExited(string(b))
+}
+
+// statExited reports whether a /proc/<pid>/stat line is of a task that exited
+// or is exiting. An exiting task gives up its namespaces before it becomes a
+// zombie, so for a short time its mount table cannot be read. On Linux 6.1
+// the enforcer found Firecracker in that state at the end of a job and
+// killed the machine.
+func statExited(stat string) bool {
 	// The state follows the command name, which is in parentheses.
-	i := bytes.LastIndexByte(b, ')')
-	if i < 0 || i+2 >= len(b) {
+	i := strings.LastIndexByte(stat, ')')
+	if i < 0 || i+2 >= len(stat) {
 		return true
 	}
-	return b[i+2] == 'Z' || b[i+2] == 'X'
+	if state := stat[i+2]; state == 'Z' || state == 'X' {
+		return true
+	}
+	flags, err := statFlags(stat)
+	return err == nil && flags&pfExiting != 0
 }
 
 func allEqual(vs []string, want string) bool {
