@@ -125,7 +125,7 @@ func New(ctx context.Context, cfg Config) (*Runtime, error) {
 		}
 		return nil, err
 	}
-	if err := setupTable(ctx, cfg.InstallID); err != nil {
+	if err := setupTable(ctx, cfg.InstallID, cfg.Pool); err != nil {
 		return nil, fmt.Errorf("set up nftables table: %w", err)
 	}
 	r.enf = newEnforcer(r)

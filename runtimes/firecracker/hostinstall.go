@@ -590,14 +590,14 @@ func (h *hostRun) tmpfilesBody() (string, error) {
 	return b.String(), nil
 }
 
-// writeModules loads the KVM and TUN modules and keeps them across a host
-// boot.
+// writeModules loads the KVM, TUN, and nftables TPROXY modules and keeps
+// them across a host boot. The gateway chain needs TPROXY.
 func (h *hostRun) writeModules(ctx context.Context) error {
 	kvm, err := h.kvmModule()
 	if err != nil {
 		return err
 	}
-	mods := []string{"kvm", kvm, "tun"}
+	mods := []string{"kvm", kvm, "tun", "nft_tproxy"}
 	for _, m := range mods {
 		if err := h.sys.loadModule(m); err != nil {
 			return err

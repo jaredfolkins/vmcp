@@ -14,6 +14,10 @@
   // busybox 1.37.0 image index; the runtime selects linux/amd64.
   "image_ref": "docker.io/library/busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
   "egress_url": "http://example.com/",
+  // The gateway subtest reaches these directly, with no proxy: SSH on TCP
+  // port 22 and DNS on UDP port 53.
+  "gateway_ssh_host": "github.com",
+  "gateway_resolver": "1.1.1.1",
   // A fake secret for the secrets subtest. It proves delivery over vsock
   // and its absence from the config drive on host disk.
   "secret_value": "live-gate-fake-secret-0123456789",

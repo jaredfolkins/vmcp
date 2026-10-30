@@ -1,0 +1,13 @@
+{
+  // Inputs of the flow recorder and gateway helper tests.
+  // A connected flow: the guest sends "out", the destination answers "in".
+  "flow": {"broker": "gateway", "proto": "tcp", "address": "93.184.215.14", "port": 22},
+  "out": "SSH-2.0-guest\r\n",
+  "in": "SSH-2.0-server greeting\r\n",
+  // Flows past the event limit. The recorder must emit one limited event,
+  // log one flow_events_limited warning, and count the rest as dropped.
+  "over_limit": 10,
+  // Original destinations of TPROXY datagrams, as IP_ORIGDSTADDR carries
+  // them.
+  "orig_dst": ["1.1.1.1:53", "203.0.113.9:51820"],
+}

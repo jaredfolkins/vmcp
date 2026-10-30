@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jaredfolkins/vmcp/api"
@@ -56,10 +57,13 @@ type brokerConfig struct {
 	// Log is the machine logger. TraceCtx carries the machine trace.
 	Log      *slog.Logger
 	TraceCtx context.Context
+	// Flows records the flows of the egress and gateway brokers.
+	Flows *flowRecorder
 }
 
 // brokers are the services of one machine on its host address.
 type brokers struct {
+	flows     *flowRecorder
 	mu        sync.Mutex
 	closers   []io.Closer
 	conns     map[net.Conn]struct{}
@@ -89,7 +93,7 @@ func plannedPorts(n api.Network, host netip.Addr) ([]allowedPort, map[string]str
 // startBrokers listens on the host address. The tap must already have that
 // address.
 func startBrokers(n api.Network, host netip.Addr, cfg brokerConfig) (*brokers, error) {
-	b := &brokers{conns: map[net.Conn]struct{}{}}
+	b := &brokers{conns: map[net.Conn]struct{}{}, flows: cfg.Flows}
 	_, b.upstreams = plannedPorts(n, host)
 	addr := func(port int) string { return net.JoinHostPort(host.String(), strconv.Itoa(port)) }
 	resolver := upstreamResolver(cfg.DNSUpstreams)
@@ -114,9 +118,14 @@ func startBrokers(n api.Network, host netip.Addr, cfg brokerConfig) (*brokers, e
 				return err
 			}
 			b.track(ln)
-			e := &egress{resolver: resolver, deny: cfg.Deny, b: b, log: cfg.Log, logCtx: cfg.TraceCtx}
+			e := &egress{resolver: resolver, deny: cfg.Deny, b: b, flows: cfg.Flows}
 			srv := &http.Server{Handler: e, ReadHeaderTimeout: headerTimeout, ConnState: b.connState}
 			go func() { _ = srv.Serve(ln) }()
+		}
+		if n.Gateway {
+			if err := b.startGateway(host, cfg); err != nil {
+				return err
+			}
 		}
 		for i, u := range n.Upstreams {
 			h, err := upstreamHandler(u, b.upstreams[u.Name], cfg.Log, cfg.TraceCtx)
@@ -184,7 +193,6 @@ func (b *brokers) close() {
 		return
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.closed = true
 	for _, c := range b.closers {
 		_ = c.Close()
@@ -193,6 +201,8 @@ func (b *brokers) close() {
 		_ = c.Close()
 	}
 	b.conns = map[net.Conn]struct{}{}
+	b.mu.Unlock()
+	b.flows.closeOut()
 }
 
 func serveDNSUDP(pc net.PacketConn, upstreams []string) {
@@ -331,16 +341,19 @@ type egress struct {
 	resolver *net.Resolver
 	deny     []netip.Prefix
 	b        *brokers
-	log      *slog.Logger
-	logCtx   context.Context
+	flows    *flowRecorder
 }
 
-func (e *egress) allowed(ip netip.Addr) bool {
+func (e *egress) allowed(ip netip.Addr) bool { return publicAddress(ip, e.deny) }
+
+// publicAddress reports whether ip is a public address outside deny. The
+// egress and gateway brokers connect only to such addresses.
+func publicAddress(ip netip.Addr, deny []netip.Prefix) bool {
 	ip = ip.Unmap()
 	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
 		return false
 	}
-	for _, p := range e.deny {
+	for _, p := range deny {
 		if p.Contains(ip) {
 			return false
 		}
@@ -348,19 +361,28 @@ func (e *egress) allowed(ip netip.Addr) bool {
 	return true
 }
 
-// dial connects to host:port through the first allowed address. It logs a
-// refused destination at INFO and an allowed one at DEBUG.
+// dial connects to host:port through the first allowed address. Each
+// refused, failed, and connected destination is a flow. The returned
+// connection records the close of its flow.
 func (e *egress) dial(ctx context.Context, hostport string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(hostport)
 	if err != nil {
 		return nil, err
 	}
+	flow := api.Flow{ID: e.flows.id(), Broker: "egress", Proto: "tcp"}
+	if p, err := strconv.Atoi(port); err == nil && p > 0 && p < 1<<16 {
+		flow.Port = p
+	}
+	if _, err := netip.ParseAddr(host); err != nil {
+		flow.Host = logHost(host)
+	}
 	deny := func(reason string, ip netip.Addr) (net.Conn, error) {
-		attrs := []any{"code", "egress_denied", "reason", reason, "host", logHost(host), "port", logHost(port)}
+		f := flow
+		f.Phase, f.Reason = api.FlowDenied, reason
 		if ip.IsValid() {
-			attrs = append(attrs, "ip", ip.String())
+			f.Address = ip.String()
 		}
-		e.log.InfoContext(e.logCtx, "egress denied", attrs...)
+		e.flows.record(f)
 		return nil, errDenied
 	}
 	var addrs []netip.Addr
@@ -381,15 +403,32 @@ func (e *egress) dial(ctx context.Context, hostport string) (net.Conn, error) {
 	if len(addrs) == 0 {
 		return deny("no_address", netip.Addr{})
 	}
+	flow.Address = addrs[0].String()
 	d := net.Dialer{Timeout: dialTimeout}
-	c, err := d.DialContext(ctx, "tcp", net.JoinHostPort(addrs[0].String(), port))
+	c, err := d.DialContext(ctx, "tcp", net.JoinHostPort(flow.Address, port))
 	if err != nil {
-		e.log.InfoContext(e.logCtx, "egress connect failed", "code", "egress_connect_failed", "host", logHost(host),
-			"port", logHost(port), "ip", addrs[0].String(), "error", trace.BoundedError(err))
+		f := flow
+		f.Phase, f.Reason = api.FlowFailed, connectFailure(err)
+		e.flows.record(f)
 		return nil, err
 	}
-	e.log.DebugContext(e.logCtx, "egress allowed", "host", logHost(host), "port", logHost(port), "ip", addrs[0].String())
-	return c, nil
+	return openFlow(e.flows, c, flow), nil
+}
+
+// connectFailure names why a connection to an allowed destination failed.
+// It never holds guest text.
+func connectFailure(err error) string {
+	var ne net.Error
+	switch {
+	case errors.As(err, &ne) && ne.Timeout():
+		return "timeout"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "refused"
+	case errors.Is(err, syscall.EHOSTUNREACH), errors.Is(err, syscall.ENETUNREACH):
+		return "unreachable"
+	default:
+		return "error"
+	}
 }
 
 // rewriteLocation maps an absolute Location on the target origin to the

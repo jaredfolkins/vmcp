@@ -132,9 +132,13 @@ type Resources struct {
 // Network is the guest network policy. vmcp always denies host loopback,
 // host and private networks, cloud metadata, and container bridges.
 type Network struct {
-	DNS          bool       `json:"dns"`
-	PublicEgress bool       `json:"public_egress"`
-	Upstreams    []Upstream `json:"upstreams,omitempty"`
+	DNS          bool `json:"dns"`
+	PublicEgress bool `json:"public_egress"`
+	// Gateway sends every guest TCP connection and UDP flow to another
+	// address through the vmcp gateway broker. The gateway connects only to
+	// public addresses. Each connection and flow is a flow event.
+	Gateway   bool       `json:"gateway,omitempty"`
+	Upstreams []Upstream `json:"upstreams,omitempty"`
 	// Ports apply only to a persistent machine.
 	Ports []Port `json:"ports,omitempty"`
 }
@@ -228,6 +232,7 @@ const (
 	EventStep   EventKind = "step"
 	EventState  EventKind = "state"
 	EventExit   EventKind = "exit"
+	EventFlow   EventKind = "flow"
 )
 
 // Event is one ordered machine event. Seq increases by one per event.
@@ -244,6 +249,48 @@ type Event struct {
 	State  MachineState `json:"state,omitempty"`
 	Data   []byte       `json:"data,omitempty"`
 	Exit   *Exit        `json:"exit,omitempty"`
+	Flow   *Flow        `json:"flow,omitempty"`
+}
+
+// FlowPhase is the stage of a guest network flow.
+type FlowPhase string
+
+// Flow phases. A flow that a broker connects has an open event and a close
+// event. A refused or failed flow has one denied or failed event. Limited
+// is the last flow event of a machine that reached the flow event limit.
+const (
+	FlowOpen    FlowPhase = "open"
+	FlowClose   FlowPhase = "close"
+	FlowDenied  FlowPhase = "denied"
+	FlowFailed  FlowPhase = "failed"
+	FlowLimited FlowPhase = "limited"
+)
+
+// Flow is one guest network connection that a broker handled. It never
+// holds guest data.
+type Flow struct {
+	// ID numbers the flows of one machine from 1. The open and close
+	// events of a flow have the same ID.
+	ID uint64 `json:"id"`
+	// Broker is "gateway" or "egress".
+	Broker string    `json:"broker"`
+	Phase  FlowPhase `json:"phase"`
+	// Proto is "tcp" or "udp".
+	Proto string `json:"proto"`
+	// Host is the destination name that the guest asked for, when the
+	// broker received one.
+	Host    string `json:"host,omitempty"`
+	Address string `json:"address,omitempty"`
+	Port    int    `json:"port,omitempty"`
+	// Reason names why a flow was denied or failed.
+	Reason string `json:"reason,omitempty"`
+	// BytesOut is from the guest; BytesIn is to the guest. A close event
+	// sets them and the duration.
+	BytesOut   int64 `json:"bytes_out,omitempty"`
+	BytesIn    int64 `json:"bytes_in,omitempty"`
+	DurationMS int64 `json:"duration_ms,omitempty"`
+	// Dropped is the number of flow events that a limited event replaces.
+	Dropped int64 `json:"dropped,omitempty"`
 }
 
 // ExitReason is the reason that a process stopped.

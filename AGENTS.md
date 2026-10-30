@@ -138,6 +138,18 @@
 - The enforcer runs in vmcp. The live gate proves that it removes a stray
   `vmcp-` tap, restores a flushed `vmcp` table, and kills a machine whose
   jail gains a setuid file or whose cgroup gains a foreign process.
+- The gateway broker (`network.gateway`, see [Gateway](#gateway)) and flow
+  events. Live evidence on 2026-10-30, on the same Ubuntu 24.04 host with
+  kernel 7.0, steps 1, 2, 3, and 5 of
+  [Container settings](#container-settings-proven-by-the-live-gate):
+  `TestLiveFirecracker` passed all seven subtests. In the `gateway`
+  subtest, a guest with no proxy reached HTTP on TCP port 80, an SSH
+  banner on TCP port 22, and a DNS answer on UDP port 53 directly. Metadata,
+  private, and host-port destinations stayed denied. Each connection was an
+  open and a close flow event with bytes and duration, each refusal a
+  denied flow event and an `egress_denied` line, and no gateway element
+  stayed after teardown. The kernel log had zero `apparmor="DENIED"` lines
+  for `vmcp-live-gate` and no suppressed audit line.
 - `runtimes/firecracker/release/` bakes in Firecracker `1.16.0` and jailer
   `1.16.0`, linux/amd64, verified against the upstream archive.
 - `runtimes/firecracker/installers/` has Debian 12 and Ubuntu 24.04 amd64 host
@@ -147,6 +159,8 @@
   names, operator paths, or build outputs.
 
 ### Container settings proven by the live gate
+`scripts/live-gate.sh` runs steps 1, 2, 3, 5, and 6 with these settings
+and fails on a failed test or on any AppArmor denial.
 Use exactly these settings. Each command below ran on 2026-10-08 with
 commit `5b4b833`. Steps 1, 2, 4, 5, and 6 ran again with commit
 `5557d4a`.
@@ -377,6 +391,8 @@ A caller uses vmcp in this order. Each step is a general API feature.
 | Input files | Upload drive tars before start |
 | Output | Follow `GET /v1/machines/{id}/events`; download writable drives after the exit |
 | Guest access to services | `network.upstreams`, with `allow_write` for writes; tokens stay on the host |
+| Guest TCP and UDP to public hosts | `network.gateway` |
+| Outbound traffic record | `flow` events in the machine event stream |
 | Secrets in guest output | `redactions` |
 | Cancel and limits | Stop or delete; `timeout_seconds`; `output_limit_bytes` |
 | Cleanup proof | `api.Proof` in the final machine record |
@@ -419,7 +435,8 @@ A caller uses vmcp in this order. Each step is a general API feature.
   path in a jail must stay under the 108-byte limit.
 - Guest network: one tap device per machine in the vmcp network namespace,
   one dedicated nftables table, and brokers written in Go inside vmcp. There
-  is no forwarding and no NAT from a tap.
+  is no forwarding and no NAT from a tap. The gateway chain uses TPROXY,
+  which delivers a packet to a local broker socket and changes no address.
 - The guest kernel and other large guest inputs are downloaded at image
   build time and pinned by SHA-256. They are never downloaded at install or
   run time.
@@ -625,7 +642,8 @@ VERIFIED (see [Current State](#current-state)).
     `cgroup.subtree_control`, and `cgroup.threads`) to the service user,
     writes `/etc/tmpfiles.d/vmcp-<id>.conf`, which creates the parent
     cgroup again at each host boot (see [Host boot](#host-boot)), loads
-    `kvm`, `kvm_intel` or `kvm_amd`, and `tun` and writes
+    `kvm`, `kvm_intel` or `kvm_amd`, `tun`, and `nft_tproxy` (for the
+    [Gateway](#gateway)) and writes
     `/etc/modules-load.d/vmcp-<id>.conf`, and verifies all of it from a
     fresh inventory. It writes `/etc/vmcp/<id>/receipt.json` (schema,
     install ID, vmcp version and commit, Firecracker release, service UID
@@ -760,6 +778,8 @@ fails, except where the notes below say otherwise.
   by `root:kvm` with mode `0660`.
 - `FSETID` keeps the setgid bits of image files whose group vmcp is not in.
   The gate image has no such file, so the gate does not prove it.
+- vmcp itself uses `NET_ADMIN` for `IP_TRANSPARENT` on the gateway
+  sockets.
 - `NET_BIND_SERVICE` lets the DNS broker bind port 53. Docker sets
   `net.ipv4.ip_unprivileged_port_start=0` in a container network
   namespace, so the gate also passed without it. vmcp keeps it, so that
@@ -802,10 +822,36 @@ shared mount ID or an unreadable mount table is a violation.
 - The enforcer detects and contains. KVM, the jailer, seccomp, cgroups, and
   the network rules prevent.
 
+### Gateway
+- `network.gateway` sends every other guest TCP connection and UDP flow to
+  the gateway broker of the machine. The `gateway` chain of the `vmcp`
+  table matches the `gateway_guest` set (tap and guest address), applies
+  TPROXY to port 3129 of the host address, and sets mark `0x766d`. The
+  `gateway_skip` set keeps traffic to the host address with the other
+  brokers and `guest_allow`.
+- The policy rule `fwmark 0x766d lookup 30317` (priority 30317) and table
+  30317 (`local default dev lo` and `throw <pool>`) deliver marked packets
+  to local sockets. The `throw` route sends lookups for guest addresses
+  back to the other tables. Without it, the source check finds the local
+  route when `src_valid_mark` is set, and the kernel drops every gateway
+  packet as a local source. vmcp writes the table, the rule, and the
+  routes at start. The enforcer restores them.
+- The gateway connects only to public addresses outside the deny prefixes
+  and the machine pool. It relays TCP with half-close. A UDP flow is a
+  source and destination pair; it closes after 60 s without a packet. One
+  machine has at most 512 open flows.
+- A flow event (`kind` `flow`) reports each guest connection of the
+  gateway and egress brokers: open, close with bytes in each direction and
+  the duration, denied with a reason, or failed. One machine emits at most
+  4096 flow events; then one `limited` event, and the log counts the rest.
+- Codes: `flow_events_limited` (`WARN`) when a machine reaches the flow
+  event limit; `enforcer_route_restored` (`ERROR`) when the enforcer
+  writes the gateway rule or routes again.
+
 ### Rules
 - A guest can reach only its brokers: DNS, policy-controlled public egress,
-  and the exact upstreams in its spec. Exposed ports accept traffic only
-  from the service network.
+  the gateway when its spec asks for it, and the exact upstreams in its
+  spec. Exposed ports accept traffic only from the service network.
 - Deny guest access to host loopback, host and private networks, cloud
   metadata, container bridges, and every other host service.
 - Never expose a Docker socket, host networking, host PID namespace, host
@@ -897,9 +943,11 @@ keeps that true.
 - `INFO`: lifecycle and every API call. Examples: start and stop with the
   configuration, one line per API request, image prepared or deleted,
   machine created, started, guest agent connected, ended, and deleted,
-  recovery, the self-test result, and each refused guest destination.
+  recovery, the self-test result, and each closed, refused, or failed
+  guest flow (`guest flow`, with `egress_denied` or `egress_connect_failed`
+  on a refusal or a failure).
 - `DEBUG`: each step and its duration. Examples: span lines, provisioning
-  steps, the jailer start, posture, kill, allowed egress, upstream
+  steps, the jailer start, posture, kill, opened guest flows, upstream
   responses, drive transfers, and health and readiness probes.
 - Required failure evidence works at `INFO`. `DEBUG` explains the steps.
   Do not log the same failure at every layer. Wrap and return errors; log

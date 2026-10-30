@@ -28,7 +28,17 @@ const (
 const (
 	PortDNS          = 53
 	PortEgress       = 3128
+	PortGateway      = 3129
 	PortUpstreamBase = 8100
+)
+
+// The gateway chain marks each guest packet that it sends to the gateway
+// broker. A policy route delivers marked packets to local sockets: their
+// destinations are not addresses of the vmcp network namespace.
+const (
+	gatewayMark       = 0x766d
+	gatewayRouteRule  = "30317"
+	gatewayRouteTable = "30317"
 )
 
 // guestNet is the network of one machine: a /30 with the host at .1 and the
@@ -41,6 +51,9 @@ type guestNet struct {
 	// Allowed lists the protocol and port pairs that the guest may open on
 	// the host address.
 	Allowed []allowedPort
+	// Gateway sends the guest's other TCP and UDP traffic to the gateway
+	// broker.
+	Gateway bool
 }
 
 type allowedPort struct {
@@ -89,8 +102,10 @@ func shortID(id string) string {
 func tableTag(installID string) string { return "vmcp:" + installID }
 
 // tableRuleset is the vmcp nftables table of an install. Each tap may
-// reach only the elements of guest_allow. Nothing is forwarded to or from
-// a tap.
+// reach only the elements of guest_allow. The gateway chain sends the other
+// TCP and UDP packets of a gateway guest to its gateway broker with TPROXY,
+// which delivers them to a local socket. Nothing is forwarded to or from a
+// tap, and nothing is translated.
 func tableRuleset(installID string) string {
 	return fmt.Sprintf(`table inet %[1]s {
 	comment "%[3]s"
@@ -98,9 +113,24 @@ func tableRuleset(installID string) string {
 		type ifname . ipv4_addr . ipv4_addr . inet_proto . inet_service
 		comment "vmcp guest broker access"
 	}
+	set gateway_guest {
+		type ifname . ipv4_addr
+		comment "vmcp gateway guests"
+	}
+	set gateway_skip {
+		type ifname . ipv4_addr . ipv4_addr
+		comment "vmcp gateway guest broker address"
+	}
+	chain gateway {
+		type filter hook prerouting priority mangle; policy accept;
+		iifname . ip saddr . ip daddr @gateway_skip return
+		iifname . ip saddr @gateway_guest meta l4proto tcp tproxy ip to :%[4]d meta mark set %#[5]x accept
+		iifname . ip saddr @gateway_guest meta l4proto udp tproxy ip to :%[4]d meta mark set %#[5]x accept
+	}
 	chain input {
 		type filter hook input priority -10; policy accept;
 		iifname "%[2]s*" iifname . ip saddr . ip daddr . meta l4proto . th dport @guest_allow accept
+		iifname "%[2]s*" meta mark %#[5]x iifname . ip saddr @gateway_guest accept
 		iifname "%[2]s*" drop
 	}
 	chain forward {
@@ -109,13 +139,62 @@ func tableRuleset(installID string) string {
 		oifname "%[2]s*" drop
 	}
 }
-`, nftTable, TapPrefix, tableTag(installID))
+`, nftTable, TapPrefix, tableTag(installID), PortGateway, gatewayMark)
 }
 
-// setupTable replaces the vmcp table with a fresh one for the install.
-func setupTable(ctx context.Context, installID string) error {
+// setupTable replaces the vmcp table with a fresh one for the install and
+// sets up the gateway route of the machine pool.
+func setupTable(ctx context.Context, installID string, pool netip.Prefix) error {
 	_ = run(ctx, nil, "nft", "delete", "table", "inet", nftTable)
-	return run(ctx, []byte(tableRuleset(installID)), "nft", "-f", "-")
+	if err := run(ctx, []byte(tableRuleset(installID)), "nft", "-f", "-"); err != nil {
+		return err
+	}
+	return setupGatewayRoute(ctx, pool)
+}
+
+// gatewayRuleArgs are the arguments of the gateway policy rule after
+// "ip rule add" or "ip rule del".
+var gatewayRuleArgs = []string{"fwmark", fmt.Sprintf("%#x", gatewayMark), "lookup", gatewayRouteTable, "priority", gatewayRouteRule}
+
+// setupGatewayRoute replaces the policy rule and the routes that deliver
+// marked gateway packets to local sockets. The throw route sends lookups for
+// the machine pool back to the other tables. Without it, the source check
+// of a marked guest packet finds the local route when src_valid_mark is set,
+// and the kernel drops the packet as a local source.
+func setupGatewayRoute(ctx context.Context, pool netip.Prefix) error {
+	for gatewayRouteExists(ctx) {
+		if err := run(ctx, nil, "ip", append([]string{"rule", "del"}, gatewayRuleArgs...)...); err != nil {
+			return err
+		}
+	}
+	if err := run(ctx, nil, "ip", append([]string{"rule", "add"}, gatewayRuleArgs...)...); err != nil {
+		return err
+	}
+	if err := run(ctx, nil, "ip", "route", "replace", "local", "0.0.0.0/0", "dev", "lo", "table", gatewayRouteTable); err != nil {
+		return err
+	}
+	return run(ctx, nil, "ip", "route", "replace", "throw", pool.Masked().String(), "table", gatewayRouteTable)
+}
+
+// gatewayRouteExists reports whether the gateway policy rule exists.
+// Reading rules and routes needs no capability.
+func gatewayRouteExists(ctx context.Context) bool {
+	out, err := toolCommand(ctx, nil, "ip", "rule", "show", "priority", gatewayRouteRule).Output()
+	return err == nil && strings.Contains(string(out), "lookup "+gatewayRouteTable)
+}
+
+// gatewayRouteReady reports whether the gateway policy rule and both routes
+// of its table exist.
+func gatewayRouteReady(ctx context.Context, pool netip.Prefix) bool {
+	if !gatewayRouteExists(ctx) {
+		return false
+	}
+	out, err := toolCommand(ctx, nil, "ip", "route", "show", "table", gatewayRouteTable).Output()
+	if err != nil {
+		return false
+	}
+	routes := string(out)
+	return strings.Contains(routes, "local default dev lo") && strings.Contains(routes, "throw "+pool.Masked().String())
 }
 
 // addTap creates the tap for uid and gid, tags it, and allows its brokers.
@@ -131,17 +210,34 @@ func addTap(ctx context.Context, g guestNet, uid int, tag string) error {
 			return err
 		}
 	}
-	if len(g.Allowed) == 0 {
-		return nil
-	}
-	return run(ctx, nil, "nft", "add", "element", "inet", nftTable, "guest_allow", g.elements(tag))
+	return addElements(ctx, g, tag)
 }
 
-// removeTap removes the broker access and the tap. It ignores a missing
-// tap.
+// addElements adds the broker access and the gateway elements of a guest.
+func addElements(ctx context.Context, g guestNet, tag string) error {
+	if len(g.Allowed) > 0 {
+		if err := run(ctx, nil, "nft", "add", "element", "inet", nftTable, "guest_allow", g.elements(tag)); err != nil {
+			return err
+		}
+	}
+	if !g.Gateway {
+		return nil
+	}
+	if err := run(ctx, nil, "nft", "add", "element", "inet", nftTable, "gateway_skip", g.skipElement(tag)); err != nil {
+		return err
+	}
+	return run(ctx, nil, "nft", "add", "element", "inet", nftTable, "gateway_guest", g.gatewayElement(tag))
+}
+
+// removeTap removes the broker access, the gateway elements, and the tap.
+// It ignores a missing tap.
 func removeTap(ctx context.Context, g guestNet, tag string) error {
 	if len(g.Allowed) > 0 {
 		_ = run(ctx, nil, "nft", "delete", "element", "inet", nftTable, "guest_allow", g.elements(tag))
+	}
+	if g.Gateway {
+		_ = run(ctx, nil, "nft", "delete", "element", "inet", nftTable, "gateway_guest", g.gatewayElement(tag))
+		_ = run(ctx, nil, "nft", "delete", "element", "inet", nftTable, "gateway_skip", g.skipElement(tag))
 	}
 	if !linkExists(ctx, g.Tap) {
 		return nil
@@ -155,6 +251,17 @@ func (g guestNet) elements(tag string) string {
 		parts = append(parts, fmt.Sprintf(`"%s" . %s . %s . %s . %d comment "%s"`, g.Tap, g.Guest, g.Host, a.Proto, a.Port, tag))
 	}
 	return "{ " + strings.Join(parts, ", ") + " }"
+}
+
+// gatewayElement is the gateway_guest element of the guest.
+func (g guestNet) gatewayElement(tag string) string {
+	return fmt.Sprintf(`{ "%s" . %s comment "%s" }`, g.Tap, g.Guest, tag)
+}
+
+// skipElement is the gateway_skip element of the guest: its traffic to the
+// host address stays with the brokers and guest_allow.
+func (g guestNet) skipElement(tag string) string {
+	return fmt.Sprintf(`{ "%s" . %s . %s comment "%s" }`, g.Tap, g.Guest, g.Host, tag)
 }
 
 // netAdminCaps is the ambient capability set of a network tool that

@@ -147,7 +147,7 @@ func (r *Runtime) Provision(ctx context.Context, ls machine.Launch) (inst machin
 }
 
 func needsNetwork(n api.Network) bool {
-	return n.DNS || n.PublicEgress || len(n.Upstreams) > 0
+	return n.DNS || n.PublicEgress || n.Gateway || len(n.Upstreams) > 0
 }
 
 // stageFiles places the kernel, root, scratch, and spec drives in the jail.
@@ -196,17 +196,21 @@ func (m *Machine) startNetwork(ctx context.Context) error {
 		}
 	}
 	g.Allowed, _ = plannedPorts(m.spec.Spec.Network, g.Host)
+	g.Gateway = m.spec.Spec.Network.Gateway
 	m.mu.Lock()
 	m.net = &g
 	m.mu.Unlock()
 	if err := addTap(ctx, g, m.uid, m.tag); err != nil {
 		return fmt.Errorf("add tap: %w", err)
 	}
+	deny := append(append([]netip.Prefix(nil), DefaultDenyPrefixes...), m.r.cfg.Deny...)
 	b, err := startBrokers(m.spec.Spec.Network, g.Host, brokerConfig{
 		DNSUpstreams: m.r.cfg.DNSUpstreams,
-		Deny:         append(append([]netip.Prefix(nil), DefaultDenyPrefixes...), m.r.cfg.Deny...),
-		Log:          m.log,
-		TraceCtx:     m.traceCtx,
+		// The machine pool holds the host addresses of every machine.
+		Deny:     append(deny, m.r.cfg.Pool.Masked()),
+		Log:      m.log,
+		TraceCtx: m.traceCtx,
+		Flows:    newFlowRecorder(m.event, m.log, m.traceCtx),
 	})
 	if err != nil {
 		return err

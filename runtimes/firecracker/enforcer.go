@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -324,12 +325,20 @@ func (e *enforcer) sweepTable(ctx context.Context) {
 		e.restoreTable(ctx)
 		return
 	}
+	if !gatewayRouteReady(ctx, e.r.cfg.Pool) && ctx.Err() == nil {
+		e.r.cfg.Logger.Error("enforcer restored the gateway route", "code", "enforcer_route_restored")
+		_ = setupGatewayRoute(ctx, e.r.cfg.Pool)
+	}
 	want := map[string]bool{}
+	gateways := map[string]bool{}
 	e.mu.Lock()
 	for _, m := range e.machines {
 		if n := m.netInfo(); n != nil {
 			for _, a := range n.Allowed {
 				want[fmt.Sprintf("%s|%s|%d", n.Tap, a.Proto, a.Port)] = true
+			}
+			if n.Gateway {
+				gateways[n.Tap+"|"+n.Guest.String()] = true
 			}
 		}
 	}
@@ -342,6 +351,23 @@ func (e *enforcer) sweepTable(ctx context.Context) {
 				})
 		}
 	}
+	for _, el := range gatewayElements(out) {
+		if !gateways[el.Tap+"|"+el.Guest] {
+			e.stray("nft gateway element", el.Tap, func() bool { return gatewayElementExists(ctx, el) },
+				func() error {
+					return run(ctx, nil, "nft", "delete", "element", "inet", nftTable, el.Set, el.expr())
+				})
+		}
+	}
+}
+
+// gatewayElementExists reports whether the set of el holds it now.
+func gatewayElementExists(ctx context.Context, el gatewayElement) bool {
+	out, err := toolCommand(ctx, netAdminCaps, "nft", "-j", "list", "table", "inet", nftTable).Output()
+	if err != nil {
+		return true
+	}
+	return slices.Contains(gatewayElements(out), el)
 }
 
 // elementExists reports whether the guest_allow set holds el now.
@@ -358,8 +384,9 @@ func elementExists(ctx context.Context, el element) bool {
 	return false
 }
 
-// expectedChainRules is the rule count of the input and forward chains.
-const expectedChainRules = 4
+// expectedChainRules is the rule count of the gateway, input, and forward
+// chains.
+const expectedChainRules = 8
 
 func chainRuleCount(listing []byte) int {
 	var doc struct {
@@ -415,25 +442,8 @@ func setElements(listing []byte) []element {
 }
 
 func parseElement(raw any) (element, bool) {
-	obj, ok := raw.(map[string]any)
-	if !ok {
-		return element{}, false
-	}
-	if inner, ok := obj["elem"].(map[string]any); ok {
-		obj = inner
-	}
-	concat, ok := obj["concat"].([]any)
-	if !ok {
-		if v, ok := obj["val"].(map[string]any); ok {
-			concat, ok = v["concat"].([]any)
-			if !ok {
-				return element{}, false
-			}
-		} else {
-			return element{}, false
-		}
-	}
-	if len(concat) != 5 {
+	concat, ok := elementConcat(raw)
+	if !ok || len(concat) != 5 {
 		return element{}, false
 	}
 	s := func(i int) string { v, _ := concat[i].(string); return v }
@@ -443,6 +453,75 @@ func parseElement(raw any) (element, bool) {
 		return element{}, false
 	}
 	return element{Tap: s(0), Guest: s(1), Host: s(2), Proto: proto, Port: int(port)}, true
+}
+
+// elementConcat returns the concatenated fields of a set element in a JSON
+// listing. An element with a comment is wrapped in an "elem" object.
+func elementConcat(raw any) ([]any, bool) {
+	obj, ok := raw.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	if inner, ok := obj["elem"].(map[string]any); ok {
+		obj = inner
+	}
+	if concat, ok := obj["concat"].([]any); ok {
+		return concat, true
+	}
+	if v, ok := obj["val"].(map[string]any); ok {
+		concat, ok := v["concat"].([]any)
+		return concat, ok
+	}
+	return nil, false
+}
+
+// gatewayElement is one element of gateway_guest or gateway_skip. Host is
+// empty in gateway_guest.
+type gatewayElement struct {
+	Set, Tap, Guest, Host string
+}
+
+func (el gatewayElement) expr() string {
+	if el.Host == "" {
+		return fmt.Sprintf(`{ "%s" . %s }`, el.Tap, el.Guest)
+	}
+	return fmt.Sprintf(`{ "%s" . %s . %s }`, el.Tap, el.Guest, el.Host)
+}
+
+// gatewayElements reads the gateway_guest and gateway_skip elements from a
+// JSON listing.
+func gatewayElements(listing []byte) []gatewayElement {
+	var doc struct {
+		Nftables []struct {
+			Set *struct {
+				Name string `json:"name"`
+				Elem []any  `json:"elem"`
+			} `json:"set"`
+		} `json:"nftables"`
+	}
+	if json.Unmarshal(listing, &doc) != nil {
+		return nil
+	}
+	var out []gatewayElement
+	for _, item := range doc.Nftables {
+		if item.Set == nil || (item.Set.Name != "gateway_guest" && item.Set.Name != "gateway_skip") {
+			continue
+		}
+		for _, raw := range item.Set.Elem {
+			concat, ok := elementConcat(raw)
+			if !ok {
+				continue
+			}
+			s := func(i int) string { v, _ := concat[i].(string); return v }
+			switch {
+			case item.Set.Name == "gateway_guest" && len(concat) == 2:
+				out = append(out, gatewayElement{Set: item.Set.Name, Tap: s(0), Guest: s(1)})
+			case item.Set.Name == "gateway_skip" && len(concat) == 3:
+				out = append(out, gatewayElement{Set: item.Set.Name, Tap: s(0), Guest: s(1), Host: s(2)})
+			}
+		}
+	}
+	return out
 }
 
 // protoName returns the inet_proto field of an element. nft prints it as a
@@ -464,7 +543,7 @@ func protoName(v any) (string, bool) {
 
 // restoreTable recreates the vmcp table and the elements of live machines.
 func (e *enforcer) restoreTable(ctx context.Context) {
-	if err := setupTable(ctx, e.r.cfg.InstallID); err != nil {
+	if err := setupTable(ctx, e.r.cfg.InstallID, e.r.cfg.Pool); err != nil {
 		return
 	}
 	e.mu.Lock()
@@ -474,8 +553,8 @@ func (e *enforcer) restoreTable(ctx context.Context) {
 	}
 	e.mu.Unlock()
 	for _, m := range ms {
-		if n := m.netInfo(); n != nil && len(n.Allowed) > 0 {
-			_ = run(ctx, nil, "nft", "add", "element", "inet", nftTable, "guest_allow", n.elements(m.tag))
+		if n := m.netInfo(); n != nil {
+			_ = addElements(ctx, *n, m.tag)
 		}
 	}
 }

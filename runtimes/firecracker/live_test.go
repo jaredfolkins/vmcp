@@ -37,19 +37,23 @@ var (
 )
 
 type liveCfg struct {
-	StateRoot      string   `json:"state_root"`
-	JailBase       string   `json:"jail_base"`
-	KernelPath     string   `json:"kernel_path"`
-	AgentPath      string   `json:"agent_path"`
-	JailerPath     string   `json:"jailer_path"`
-	CgroupParent   string   `json:"cgroup_parent"`
-	Pool           string   `json:"pool"`
-	DNSUpstreams   []string `json:"dns_upstreams"`
-	ImageRef       string   `json:"image_ref"`
-	EgressURL      string   `json:"egress_url"`
-	SecretValue    string   `json:"secret_value"`
-	SecretFilePath string   `json:"secret_file_path"`
-	MissingBinary  string   `json:"missing_binary"`
+	StateRoot    string   `json:"state_root"`
+	JailBase     string   `json:"jail_base"`
+	KernelPath   string   `json:"kernel_path"`
+	AgentPath    string   `json:"agent_path"`
+	JailerPath   string   `json:"jailer_path"`
+	CgroupParent string   `json:"cgroup_parent"`
+	Pool         string   `json:"pool"`
+	DNSUpstreams []string `json:"dns_upstreams"`
+	ImageRef     string   `json:"image_ref"`
+	EgressURL    string   `json:"egress_url"`
+	// GatewaySSHHost serves SSH on TCP port 22. GatewayResolver answers DNS
+	// on UDP port 53. The gateway subtest reaches both directly.
+	GatewaySSHHost  string `json:"gateway_ssh_host"`
+	GatewayResolver string `json:"gateway_resolver"`
+	SecretValue     string `json:"secret_value"`
+	SecretFilePath  string `json:"secret_file_path"`
+	MissingBinary   string `json:"missing_binary"`
 }
 
 func loadLiveCfg(t *testing.T) liveCfg {
@@ -94,6 +98,19 @@ func (r *recorder) dump() string {
 		fmt.Fprintf(&b, "[%s %s %s %q] ", ev.Kind, ev.Step, ev.Status, ev.Data)
 	}
 	return b.String()
+}
+
+// flows returns the flow of each flow event.
+func (r *recorder) flows() []api.Flow {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []api.Flow
+	for _, ev := range r.events {
+		if ev.Kind == api.EventFlow && ev.Flow != nil {
+			out = append(out, *ev.Flow)
+		}
+	}
+	return out
 }
 
 func (r *recorder) output(kind api.EventKind) string {
@@ -338,6 +355,83 @@ func TestLiveFirecracker(t *testing.T) {
 			if line := logs.since(mark, code); line != "" {
 				t.Errorf("enforcer acted on a live machine's network: %s", line)
 			}
+		}
+	})
+	// The gateway broker on a real guest: direct TCP to HTTP and SSH ports
+	// and direct UDP DNS reach public hosts with no proxy; metadata,
+	// private, and host-port destinations stay denied; the broker DNS still
+	// works; each connection is a flow event and a log line; and the
+	// gateway elements leave with the machine.
+	t.Run("gateway", func(t *testing.T) {
+		script := strings.Join([]string{
+			"env | grep -qi '_proxy=' && echo PROXY_SET || echo PROXY_UNSET",
+			// Any HTTP response proves the path. The status belongs to the
+			// public server, which can refuse busybox.
+			fmt.Sprintf("wget -S -T 10 -O /dev/null %s 2>&1 | grep -q 'HTTP/1' && echo GW_HTTP_OK || echo GW_HTTP_FAILED", c.EgressURL),
+			// The server sends its banner first. An early end of input would
+			// half-close the connection before it does.
+			fmt.Sprintf("(sleep 3) | nc -w 10 %s 22 | head -c 4 | grep -q SSH- && echo GW_SSH_OK || echo GW_SSH_FAILED", c.GatewaySSHHost),
+			fmt.Sprintf("nslookup example.com %s >/dev/null 2>&1 && echo GW_UDP_OK || echo GW_UDP_FAILED", c.GatewayResolver),
+			"wget -q -T 5 -O /dev/null http://169.254.169.254/ && echo METADATA_REACHED || echo METADATA_DENIED",
+			"wget -q -T 5 -O /dev/null http://10.0.0.1/ && echo PRIVATE_REACHED || echo PRIVATE_DENIED",
+			"gw=$(ip route | awk '/default/ {print $3}'); wget -q -T 3 -O /dev/null http://$gw:8080/ && echo HOSTPORT_REACHED || echo HOSTPORT_DENIED",
+			"nslookup example.com >/dev/null 2>&1 && echo DNS_OK || echo DNS_FAILED",
+		}, "; ")
+		mark := logs.mark()
+		rec, res, _ := runLive(t, ctx, rt, "m-99aabbccddeeff00", 5, api.MachineSpec{
+			Network: api.Network{DNS: true, Gateway: true},
+			Process: api.Process{Args: []string{"/bin/sh", "-c", script}},
+		}, "")
+		out := rec.output(api.EventStdout)
+		for _, want := range []string{"PROXY_UNSET", "GW_HTTP_OK", "GW_SSH_OK", "GW_UDP_OK", "METADATA_DENIED", "PRIVATE_DENIED", "HOSTPORT_DENIED", "DNS_OK"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("gateway output missing %s; got %q", want, out)
+			}
+		}
+		flows := rec.flows()
+		closed := func(proto string, port int, sends bool) bool {
+			for _, f := range flows {
+				if f.Broker == "gateway" && f.Phase == api.FlowClose && f.Proto == proto && f.Port == port &&
+					f.BytesIn > 0 && (f.BytesOut > 0 || !sends) {
+					return true
+				}
+			}
+			return false
+		}
+		// The SSH probe only reads the server banner.
+		for _, w := range []struct {
+			proto string
+			port  int
+			sends bool
+		}{{"tcp", 80, true}, {"tcp", 22, false}, {"udp", 53, true}} {
+			if !closed(w.proto, w.port, w.sends) {
+				t.Errorf("no closed gateway %s flow to port %d with its bytes; flows: %+v", w.proto, w.port, flows)
+			}
+		}
+		for _, addr := range []string{"169.254.169.254", "10.0.0.1"} {
+			found := false
+			for _, f := range flows {
+				found = found || (f.Phase == api.FlowDenied && f.Address == addr && f.Reason == "address_not_public")
+			}
+			if !found {
+				t.Errorf("no denied gateway flow to %s; flows: %+v", addr, flows)
+			}
+		}
+		if line := logs.since(mark, "egress_denied"); !strings.Contains(line, `"broker":"gateway"`) {
+			t.Errorf("no egress_denied gateway log line; got %q", line)
+		}
+		checkProof(t, rt, res)
+		for _, code := range []string{"enforcer_stray_removed", "enforcer_cleanup_failed", "enforcer_table_restored", "enforcer_route_restored"} {
+			if line := logs.since(mark, code); line != "" {
+				t.Errorf("enforcer acted on a live gateway machine: %s", line)
+			}
+		}
+		listing, err := toolCommand(ctx, netAdminCaps, "nft", "-j", "list", "table", "inet", nftTable).Output()
+		if err != nil {
+			t.Fatalf("list the vmcp table: %v", err)
+		}
+		if els := gatewayElements(listing); len(els) != 0 {
+			t.Errorf("gateway elements remain after teardown: %+v", els)
 		}
 	})
 }

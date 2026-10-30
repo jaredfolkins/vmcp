@@ -17,6 +17,7 @@ import (
 
 var (
 	nftElementsConfig   = flag.String("vmcp-nft-elements-config", "testdata/nft-elements.hujson", "HuJSON file with nft listings")
+	nftGatewayConfig    = flag.String("vmcp-nft-gateway-config", "testdata/nft-gateway.hujson", "HuJSON file with an nft listing of a gateway machine")
 	enforcerSweepConfig = flag.String("vmcp-enforcer-sweep-config", "testdata/enforcer-sweep.hujson", "HuJSON file with enforcer sweep cases")
 )
 
@@ -110,5 +111,36 @@ func TestSetElementsReadsEveryProtocolForm(t *testing.T) {
 				t.Errorf("element keys = %q, want %q", got, tc.Want)
 			}
 		})
+	}
+}
+
+// TestGatewayListingMatchesEnforcer proves that the enforcer reads a real
+// listing of the vmcp table with a gateway machine: the rule count of its
+// three chains and the elements of both gateway sets. A wrong count makes
+// the enforcer restore a healthy table on every sweep; a missed element
+// makes it keep a stray gateway element.
+func TestGatewayListingMatchesEnforcer(t *testing.T) {
+	var in struct {
+		Listing      json.RawMessage `json:"listing"`
+		WantElements []struct {
+			Set   string `json:"set"`
+			Tap   string `json:"tap"`
+			Guest string `json:"guest"`
+			Host  string `json:"host"`
+		} `json:"want_elements"`
+	}
+	readHuJSON(t, *nftGatewayConfig, &in)
+	if got := chainRuleCount(in.Listing); got != expectedChainRules {
+		t.Errorf("chainRuleCount() = %d, want %d", got, expectedChainRules)
+	}
+	var want []gatewayElement
+	for _, w := range in.WantElements {
+		want = append(want, gatewayElement{Set: w.Set, Tap: w.Tap, Guest: w.Guest, Host: w.Host})
+	}
+	if got := gatewayElements(in.Listing); !slices.Equal(got, want) {
+		t.Errorf("gatewayElements() = %+v, want %+v", got, want)
+	}
+	if got := setElements(in.Listing); len(got) != 0 {
+		t.Errorf("setElements() read gateway elements as guest_allow: %+v", got)
 	}
 }

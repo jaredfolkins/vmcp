@@ -398,7 +398,8 @@ func (m *Manager) CreateMachine(ctx context.Context, spec api.MachineSpec) (api.
 	en.log.InfoContext(ctx, "machine created", "image", spec.Image, "lifecycle", spec.Lifecycle, "slot", slot,
 		"timeout_s", spec.TimeoutSeconds, "vcpus", spec.Resources.VCPUs, "memory_mib", spec.Resources.MemoryMiB,
 		"drives", len(spec.Drives), "files", len(spec.Files), "dns", spec.Network.DNS,
-		"public_egress", spec.Network.PublicEgress, "upstreams", len(spec.Network.Upstreams), "labels", spec.Labels)
+		"public_egress", spec.Network.PublicEgress, "gateway", spec.Network.Gateway, "upstreams", len(spec.Network.Upstreams),
+		"labels", spec.Labels)
 	if spec.Start {
 		return m.StartMachine(ctx, id)
 	}

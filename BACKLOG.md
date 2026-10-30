@@ -25,6 +25,12 @@ that every item follows.
   live gate and the end-to-end gate pass with no AppArmor denial. Commits
   `a8262bb` and `cf751c1`.
 
+- **Gateway broker and flow events.** `network.gateway` sends a guest's
+  other TCP and UDP traffic to a Go broker with nftables TPROXY, with no
+  forwarding and no NAT. The broker connects only to public addresses.
+  Each connection of the gateway and egress brokers is a `flow` event and
+  a log line. `scripts/live-gate.sh` runs the Firecracker live gate.
+
 ## Next
 1. **V4 Install and upgrade.** `vmcp install` and the OS folder entry
    points. A caller's installer can call it. Accept: on each

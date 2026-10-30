@@ -574,8 +574,8 @@ func checkInstalled(t *testing.T, f *fakeHost, cfg HostConfig) {
 	if b, _ := os.ReadFile(filepath.Join(parent, "cgroup.subtree_control")); strings.Join(strings.Fields(string(b)), " ") != "cpu memory pids" {
 		t.Errorf("parent controllers = %q, want cpu memory pids", b)
 	}
-	if mods := f.modules[len(f.modules)-3:]; !slices.Equal(mods, []string{"kvm", "kvm_intel", "tun"}) {
-		t.Errorf("loaded modules = %q, want kvm, kvm_intel, tun", mods)
+	if mods := f.modules[len(f.modules)-4:]; !slices.Equal(mods, []string{"kvm", "kvm_intel", "tun", "nft_tproxy"}) {
+		t.Errorf("loaded modules = %q, want kvm, kvm_intel, tun, nft_tproxy", mods)
 	}
 }
 
