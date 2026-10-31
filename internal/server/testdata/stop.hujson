@@ -29,4 +29,15 @@
     "want_start_status": 409,
     "want_start_code": "conflict",
   },
+  // A machine that ran when the vmcp process ended. The next vmcp process
+  // removes its resources at start and records a proof.
+  "restart": {
+    "program": "hang",
+    "machine_name": "running-at-restart",
+    "deadline_ms": 2000,
+    "want_state": "failed",
+    "want_exit_reason": "failed",
+    "want_exit_detail": "vmcp restarted",
+    "want_destroy_reason": "vmcp-restarted",
+  },
 }

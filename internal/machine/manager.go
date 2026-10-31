@@ -151,9 +151,12 @@ func (m *Manager) machineDir(id string) string {
 }
 
 // load reads every record. A machine that an earlier process left running
-// becomes failed. It returns the number of such machines.
+// becomes failed, with a proof: New calls load only after Runtime.Recover
+// removed every machine resource that an earlier process left. It returns
+// the number of such machines.
 func (m *Manager) load(ctx context.Context) (int, error) {
 	failed := 0
+	st := m.rt.Status()
 	imgs, _ := os.ReadDir(m.imageRecordsDir())
 	for _, e := range imgs {
 		var img api.Image
@@ -176,6 +179,12 @@ func (m *Manager) load(ctx context.Context) (int, error) {
 		case api.StateCreated, api.StateRunning, api.StateStopping:
 			en.rec.Machine.State = api.StateFailed
 			en.rec.Machine.Exit = &api.Exit{Code: -1, Reason: api.ExitFailed, Detail: "vmcp restarted"}
+			proof := api.Proof{MachineID: rec.Machine.ID, Runtime: st.Runtime, Release: st.Release,
+				DestroyReason: stopReasonRestart, Destroyed: true, TeardownStatus: "destroyed"}
+			if img := m.images[rec.Machine.Image]; img != nil {
+				proof.ImageDigest = img.ImageDigest
+			}
+			en.rec.Machine.Proof = &proof
 			en.rec.Machine.UpdatedAt = time.Now().UTC()
 			_ = ev.append(api.Event{Kind: api.EventExit, Exit: en.rec.Machine.Exit})
 			_ = m.save(en)
@@ -846,6 +855,10 @@ func (m *Manager) DeleteMachine(ctx context.Context, id string) (api.Machine, er
 // stopReasonShutdown is the kill reason of a machine that vmcp stops
 // because vmcp itself stops.
 const stopReasonShutdown = "vmcp-stopping"
+
+// stopReasonRestart is the destroy reason of a machine that an earlier vmcp
+// process left. Runtime.Recover removed its resources.
+const stopReasonRestart = "vmcp-restarted"
 
 // Shutdown stops every running machine because vmcp is stopping, and waits
 // until each one ended or ctx ends. An ephemeral machine cannot outlive the

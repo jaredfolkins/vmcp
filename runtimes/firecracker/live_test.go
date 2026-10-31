@@ -409,6 +409,65 @@ func TestLiveFirecracker(t *testing.T) {
 			}
 		})
 
+		// A machine that runs when the vmcp process ends: the next process
+		// removes its resources at start and gives it a proof.
+		t.Run("restart", func(t *testing.T) {
+			m, err := mgr.CreateMachine(ctx, spec("live-running-at-restart"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := mgr.StartMachine(ctx, m.ID); err != nil {
+				t.Fatalf("StartMachine() error = %v", err)
+			}
+			running := make(chan struct{})
+			ended := make(chan struct{})
+			go func() {
+				defer close(ended)
+				once := false
+				_ = mgr.Events(ctx, m.ID, 0, true, func(ev api.Event) error {
+					if !once && ev.Kind == api.EventStdout && strings.Contains(string(ev.Data), c.StopMarker) {
+						once = true
+						close(running)
+					}
+					return nil
+				})
+			}()
+			select {
+			case <-running:
+			case <-time.After(time.Minute):
+				t.Fatal("the machine did not run its process")
+			}
+			// The disk state of a vmcp process that ended now: a copy of
+			// the records and of the machine event log. The first manager
+			// keeps writing to its own state directory, which a dead
+			// process cannot do.
+			// The AppArmor profile lets vmcp write only under its state root.
+			crashed := filepath.Join(c.StateRoot, "live-restart-"+m.ID)
+			t.Cleanup(func() { _ = os.RemoveAll(crashed) })
+			for _, rel := range []string{"records", filepath.Join("machines", m.ID, "events.ndjson")} {
+				if err := copyTree(filepath.Join(c.StateRoot, rel), filepath.Join(crashed, rel)); err != nil {
+					t.Fatalf("copy the state of the ended process: %v", err)
+				}
+			}
+			next, err := machine.New(ctx, rt, machine.Config{Dir: crashed, MaxMachines: 4,
+				Logger: slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+			if err != nil {
+				t.Fatalf("machine.New() after the restart error = %v", err)
+			}
+			got, err := next.Machine(m.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("after restart: state %s exit %+v proof %+v", got.State, got.Exit, got.Proof)
+			if got.State != api.StateFailed || got.Proof == nil || !got.Proof.Destroyed || got.Proof.DestroyReason != "vmcp-restarted" {
+				t.Errorf("machine after restart = state %s proof %+v; want failed with a destroyed proof, reason vmcp-restarted", got.State, got.Proof)
+			}
+			checkNoMachineResources(t, rt, 0)
+			<-ended
+			if _, err := next.DeleteMachine(ctx, m.ID); err != nil {
+				t.Errorf("DeleteMachine() after restart error = %v", err)
+			}
+		})
 	})
 
 	t.Run("enforcer", func(t *testing.T) {
@@ -737,6 +796,31 @@ func proofTeardown(p *api.Proof) string {
 		return ""
 	}
 	return p.TeardownStatus
+}
+
+// copyTree copies the regular file or the directory tree src to dst.
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(target, b, 0o600)
+	})
 }
 
 // checkNoMachineResources waits up to d until no machine cgroup and no

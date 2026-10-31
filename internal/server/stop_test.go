@@ -26,6 +26,7 @@ type stopCase struct {
 	DeadlineMS        int    `json:"deadline_ms"`
 	WantState         string `json:"want_state"`
 	WantExitReason    string `json:"want_exit_reason"`
+	WantExitDetail    string `json:"want_exit_detail"`
 	WantDestroyReason string `json:"want_destroy_reason"`
 	WantStartStatus   int    `json:"want_start_status"`
 	WantStartCode     string `json:"want_start_code"`
@@ -35,6 +36,7 @@ type stopTestInput struct {
 	StopDuringProvision   stopCase `json:"stop_during_provision"`
 	DeleteDuringProvision stopCase `json:"delete_during_provision"`
 	StopBeforeStart       stopCase `json:"stop_before_start"`
+	Restart               stopCase `json:"restart"`
 }
 
 func readStopInput(t *testing.T) stopTestInput {
@@ -54,7 +56,7 @@ func readStopInput(t *testing.T) stopTestInput {
 		t.Fatal(err)
 	}
 	for name, c := range map[string]stopCase{"stop_during_provision": in.StopDuringProvision,
-		"delete_during_provision": in.DeleteDuringProvision, "stop_before_start": in.StopBeforeStart} {
+		"delete_during_provision": in.DeleteDuringProvision, "stop_before_start": in.StopBeforeStart, "restart": in.Restart} {
 		if c.Program == "" || c.MachineName == "" || c.DeadlineMS <= 0 || c.WantState == "" {
 			t.Fatalf("stop test input %s is incomplete", name)
 		}
@@ -253,5 +255,44 @@ func TestStopBeforeStartPreventsStart(t *testing.T) {
 	}
 	if exit == nil || string(exit.Reason) != in.WantExitReason {
 		t.Errorf("stream exit = %+v, want reason %s", exit, in.WantExitReason)
+	}
+}
+
+// TestRestartGivesFailedMachinesAProof proves that a machine that ran when
+// the vmcp process ended gets a destroyed proof from the next process.
+// That process removed every machine resource at start, but the machine
+// kept no proof, so its caller could not prove the cleanup.
+func TestRestartGivesFailedMachinesAProof(t *testing.T) {
+	in := readStopInput(t).Restart
+	if in.WantExitReason == "" || in.WantExitDetail == "" || in.WantDestroyReason == "" {
+		t.Fatal("restart needs want_exit_reason, want_exit_detail, and want_destroy_reason")
+	}
+	dir := t.TempDir()
+	rt := &fakeRuntime{}
+	old, ctx := newStopManager(t, dir, rt, in)
+	m := createStopMachine(t, ctx, old, in)
+	if _, err := old.StartMachine(ctx, m.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The old process ends without a shutdown. Its guest stops later.
+	t.Cleanup(func() { _, _ = old.StopMachine(context.Background(), m.ID) })
+
+	next, _ := newStopManager(t, dir, rt, in)
+	got, err := next.Machine(m.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got.State) != in.WantState || got.Exit == nil || string(got.Exit.Reason) != in.WantExitReason ||
+		got.Exit.Detail != in.WantExitDetail {
+		t.Errorf("machine after restart = state %s exit %+v; want state %s, exit %s %q",
+			got.State, got.Exit, in.WantState, in.WantExitReason, in.WantExitDetail)
+	}
+	if got.Proof == nil || !got.Proof.Destroyed || got.Proof.TeardownStatus != "destroyed" ||
+		got.Proof.DestroyReason != in.WantDestroyReason || got.Proof.MachineID != m.ID {
+		t.Errorf("machine proof after restart = %+v, want a destroyed proof for %s with reason %s",
+			got.Proof, m.ID, in.WantDestroyReason)
+	}
+	if rt.recoveredCount() != 2 {
+		t.Errorf("runtime recoveries = %d, want 2", rt.recoveredCount())
 	}
 }

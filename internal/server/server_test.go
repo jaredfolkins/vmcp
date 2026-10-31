@@ -80,6 +80,12 @@ func (f *fakeRuntime) PrepareSelfTestImage(context.Context, string) (machine.Ima
 	return machine.ImageInfo{ImageDigest: "sha256:selftest", Compatibility: f.ImageCompatibility(), Process: machine.ProcessConfig{Cmd: []string{"echo:{\"metadata_denied\":true}"}}}, nil
 }
 
+func (f *fakeRuntime) recoveredCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.recovered
+}
+
 func (f *fakeRuntime) Recover(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
