@@ -54,6 +54,12 @@ type liveCfg struct {
 	SecretValue     string `json:"secret_value"`
 	SecretFilePath  string `json:"secret_file_path"`
 	MissingBinary   string `json:"missing_binary"`
+	// StopAfterBootMS are the delays after Boot returns at which the
+	// stop-during-boot subtest kills a machine. A delay of 0 kills it
+	// before the jailer has created its cgroup.
+	StopAfterBootMS []int `json:"stop_after_boot_ms"`
+	// StopMarker is what the stopped process would print if it ran.
+	StopMarker string `json:"stop_marker"`
 }
 
 func loadLiveCfg(t *testing.T) liveCfg {
@@ -245,6 +251,57 @@ func TestLiveFirecracker(t *testing.T) {
 			t.Errorf("failed step detail = %q, want the missing binary %q; events %s", detail, c.MissingBinary, rec.dump())
 		}
 		checkProof(t, rt, res)
+	})
+
+	// A stop during boot must end the machine before its process runs and
+	// remove every resource. A kill before the jailer created the cgroup
+	// found no process, so the guest ran its process. A kill during boot
+	// removed the cgroup while it was still populated, which Linux 6.1
+	// refuses, and the proof was partial.
+	t.Run("stop-during-boot", func(t *testing.T) {
+		if len(c.StopAfterBootMS) == 0 || c.StopMarker == "" {
+			t.Fatal("live config needs stop_after_boot_ms and stop_marker")
+		}
+		for i, delay := range c.StopAfterBootMS {
+			id := fmt.Sprintf("m-5f0%013x", i)
+			dir := filepath.Join(rt.machinesDir(), id)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			rec := &recorder{}
+			args := []string{"/bin/sh", "-c", fmt.Sprintf("echo %s; sleep 600", c.StopMarker)}
+			m, err := rt.Provision(ctx, machine.Launch{ID: id, Slot: 4, Dir: dir, ImageID: "img-live",
+				Spec: api.MachineSpec{Resources: api.Resources{VCPUs: 1, MemoryMiB: 256, DiskMiB: 256}, Process: api.Process{Args: args}},
+				Args: args, Env: []string{"PATH=/bin:/usr/bin:/sbin:/usr/sbin"}, WorkDir: "/", Sink: rec})
+			if err != nil {
+				t.Fatalf("Provision() error = %v", err)
+			}
+			if err := m.Boot(ctx); err != nil {
+				t.Fatalf("Boot() error = %v", err)
+			}
+			time.Sleep(time.Duration(delay) * time.Millisecond)
+			m.(*Machine).Kill("stopped")
+			res := waitKilled(t, m.(*Machine), time.Minute)
+			t.Logf("stop %d ms after boot: proof %s, reason %s", delay, res.Proof.TeardownStatus, res.Proof.DestroyReason)
+			if out := rec.output(api.EventStdout); strings.Contains(out, c.StopMarker) {
+				t.Errorf("stop %d ms after boot: the process ran; stdout %q", delay, out)
+			}
+			p := res.Proof
+			if !p.Destroyed || p.TeardownStatus != "destroyed" || p.DestroyReason != "stopped" {
+				t.Errorf("stop %d ms after boot: proof = %+v, want destroyed with reason stopped", delay, p)
+			}
+			if cg, _ := p.Detail["cgroup"].(string); cg != "" {
+				if _, err := os.Lstat(cg); err == nil {
+					t.Errorf("stop %d ms after boot: cgroup %s remains", delay, cg)
+				}
+			}
+			if jail, _ := p.Detail["jail_id"].(string); jail != "" {
+				if _, err := os.Lstat(filepath.Join(rt.cfg.JailBase, "firecracker", jail)); err == nil {
+					t.Errorf("stop %d ms after boot: jail %s remains", delay, jail)
+				}
+			}
+		}
 	})
 
 	t.Run("enforcer", func(t *testing.T) {

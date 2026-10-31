@@ -25,4 +25,8 @@
   // A process path that does not exist. The guest agent must report why
   // the process did not start.
   "missing_binary": "/nonexistent/vmcp-live-missing",
+  // The stop-during-boot subtest kills a machine at once after Boot (the
+  // jailer has no cgroup yet) and while the guest kernel boots.
+  "stop_after_boot_ms": [0, 300],
+  "stop_marker": "VMCP_LIVE_STOPPED_PROCESS_RAN",
 }

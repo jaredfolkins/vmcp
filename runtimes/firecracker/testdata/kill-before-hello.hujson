@@ -1,0 +1,8 @@
+// A machine that was killed before the jailer created its cgroup. The kill
+// found no process, so the guest booted and its agent says hello.
+{
+  "kill_reason": "stopped",
+  "hello": "{\"type\":\"hello\",\"version\":1}\n",
+  "secret_env": "TOKEN=kill-before-hello-canary",
+  "events_unpopulated": "populated 0\nfrozen 0\n"
+}

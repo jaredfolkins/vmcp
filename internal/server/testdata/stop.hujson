@@ -1,0 +1,9 @@
+{
+  // A machine that is stopped while vmcp provisions it. Its program runs
+  // until it is killed, so a guest that boots does not end by itself.
+  "program": "hang",
+  "machine_name": "stopped-while-provisioning",
+  "deadline_ms": 2000,
+  "want_state": "exited",
+  "want_exit_reason": "stopped",
+}

@@ -647,7 +647,15 @@ func (m *Manager) StartMachine(ctx context.Context, id string) (api.Machine, err
 	}
 	m.mu.Lock()
 	en.inst = inst
+	killReason := en.killReason
 	m.mu.Unlock()
+	if killReason != "" {
+		// A stop came while the machine had no instance, so kill only
+		// recorded it. The guest must not boot.
+		log.InfoContext(ctx, "machine stopped before boot", "kill_reason", killReason, "provision_ms", provisionMS)
+		m.finish(en, inst.Destroy(ctx, killReason))
+		return m.Machine(id)
+	}
 	bctx, span := trace.Start(ctx, log, "machine.boot")
 	err = inst.Boot(bctx)
 	bootMS := trace.Millis(span.End(err))

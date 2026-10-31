@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,6 +34,13 @@ type fakeRuntime struct {
 	// compat is the image compatibility key; empty means "fake".
 	compat   string
 	prepared int
+	// provisioning, when not nil, gets a value when Provision starts.
+	// Provision then waits until release is closed, so that a test can act
+	// while vmcp provisions a machine.
+	provisioning chan struct{}
+	release      chan struct{}
+	// boots counts the guests that booted.
+	boots atomic.Int32
 }
 
 func (f *fakeRuntime) ImageCompatibility() string {
@@ -80,18 +88,26 @@ func (f *fakeRuntime) Recover(context.Context) error {
 }
 
 func (f *fakeRuntime) Provision(_ context.Context, l machine.Launch) (machine.Instance, error) {
-	return &fakeInstance{l: l, done: make(chan struct{}), kill: make(chan string, 1)}, nil
+	if f.provisioning != nil {
+		f.provisioning <- struct{}{}
+		<-f.release
+	}
+	return &fakeInstance{rt: f, l: l, done: make(chan struct{}), kill: make(chan string, 1)}, nil
 }
 
 type fakeInstance struct {
+	rt     *fakeRuntime
 	l      machine.Launch
 	done   chan struct{}
 	kill   chan string
 	result machine.Result
 	once   sync.Once
+	booted atomic.Bool
 }
 
 func (i *fakeInstance) Boot(context.Context) error {
+	i.booted.Store(true)
+	i.rt.boots.Add(1)
 	go func() {
 		prog := i.l.Args[0]
 		var exit *api.Exit
@@ -153,6 +169,10 @@ func (i *fakeInstance) Kill(reason string) {
 func (i *fakeInstance) Done() <-chan struct{}  { return i.done }
 func (i *fakeInstance) Result() machine.Result { <-i.done; return i.result }
 func (i *fakeInstance) Destroy(_ context.Context, reason string) machine.Result {
+	if !i.booted.Load() {
+		i.finish(nil)
+		return i.Result()
+	}
 	i.Kill(reason)
 	return i.Result()
 }

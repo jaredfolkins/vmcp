@@ -592,10 +592,17 @@ func (m *Machine) readEvents(c net.Conn) {
 		}
 		switch msg.Type {
 		case agentproto.TypeHello:
-			m.sendSecrets(c)
 			m.mu.Lock()
-			logCtx, bootStart := m.traceCtx, m.bootStart
+			logCtx, bootStart, killReason := m.traceCtx, m.bootStart, m.killReason
 			m.mu.Unlock()
+			if killReason != "" {
+				// A kill before the jailer created the cgroup found no
+				// process. The cgroup exists now, so kill again, and send
+				// the guest no secrets.
+				m.Kill(killReason)
+				return
+			}
+			m.sendSecrets(c)
 			m.log.InfoContext(logCtx, "guest agent connected", "boot_ms", trace.Millis(time.Since(bootStart)))
 			m.event(api.Event{Kind: api.EventStep, Step: "guest-agent", Status: "running"})
 			m.checkPosture()
