@@ -950,7 +950,7 @@ func (m *Manager) finish(en *entry, res Result) {
 		snk.clear()
 	}
 	_ = m.save(en)
-	_ = en.events.append(api.Event{Kind: api.EventExit, Exit: exit, State: en.rec.Machine.State})
+	_ = en.events.append(api.Event{Kind: api.EventExit, Exit: exit, State: state})
 	en.events.close()
 	if log == nil {
 		log = m.log.With("machine", en.rec.Machine.ID, "machine_name", en.rec.Machine.Name)
