@@ -60,6 +60,9 @@ type liveCfg struct {
 	StopAfterBootMS []int `json:"stop_after_boot_ms"`
 	// StopMarker is what the stopped process would print if it ran.
 	StopMarker string `json:"stop_marker"`
+	// DeleteAfterStartMS are the delays after StartMachine began at which
+	// the manager subtest deletes a machine.
+	DeleteAfterStartMS []int `json:"delete_after_start_ms"`
 }
 
 func loadLiveCfg(t *testing.T) liveCfg {
@@ -302,6 +305,88 @@ func TestLiveFirecracker(t *testing.T) {
 				}
 			}
 		}
+	})
+
+	// The manager subtests run the real runtime under the machine manager,
+	// as vmcp serve does.
+	t.Run("manager", func(t *testing.T) {
+		if len(c.DeleteAfterStartMS) == 0 || c.StopMarker == "" {
+			t.Fatal("live config needs delete_after_start_ms and stop_marker")
+		}
+		mgr, err := machine.New(ctx, rt, machine.Config{Dir: c.StateRoot, MaxMachines: 4,
+			Logger: slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+		if err != nil {
+			t.Fatalf("machine.New() error = %v", err)
+		}
+		img, err := mgr.CreateImage(ctx, api.ImageRequest{Ref: c.ImageRef})
+		if err != nil {
+			t.Fatalf("CreateImage() error = %v", err)
+		}
+		t.Cleanup(func() { _ = mgr.DeleteImage(context.Background(), img.ID) })
+		spec := func(name string) api.MachineSpec {
+			return api.MachineSpec{Name: name, Lifecycle: api.Ephemeral, Image: img.ID, TimeoutSeconds: 120,
+				Resources: api.Resources{VCPUs: 1, MemoryMiB: 256, DiskMiB: 256},
+				Process:   api.Process{Args: []string{"/bin/sh", "-c", fmt.Sprintf("echo %s; sleep 600", c.StopMarker)}}}
+		}
+
+		// A delete during start returns a destroyed proof. A guest that
+		// had not booted never boots, and nothing is left.
+		t.Run("delete-during-start", func(t *testing.T) {
+			for i, delay := range c.DeleteAfterStartMS {
+				// A stream of a machine that the manager lost never ends,
+				// so each attempt has its own deadline.
+				ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				defer cancel()
+				m, err := mgr.CreateMachine(ctx, spec(fmt.Sprintf("live-delete-during-start-%d", i)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				rec := &recorder{}
+				streamed := make(chan struct{})
+				go func() {
+					defer close(streamed)
+					_ = mgr.Events(ctx, m.ID, 0, true, func(ev api.Event) error {
+						rec.Event(ev)
+						return nil
+					})
+				}()
+				started := make(chan error, 1)
+				go func() {
+					_, err := mgr.StartMachine(ctx, m.ID)
+					started <- err
+				}()
+				time.Sleep(time.Duration(delay) * time.Millisecond)
+				final, err := mgr.DeleteMachine(ctx, m.ID)
+				<-started
+				<-streamed
+				booted := false
+				rec.mu.Lock()
+				for _, ev := range rec.events {
+					booted = booted || (ev.Kind == api.EventStep && ev.Step == "boot")
+				}
+				rec.mu.Unlock()
+				// The window that the delete hit: before the start (a
+				// manager proof), during Provision (a runtime proof and no
+				// boot), or after the boot began.
+				window := "after boot began"
+				switch {
+				case !booted && final.Proof != nil && final.Proof.Runtime == "":
+					window = "before start"
+				case !booted:
+					window = "during provision"
+				}
+				t.Logf("delete %d ms after start: window %s, proof destroyed %t, teardown %q",
+					delay, window, final.Proof != nil && final.Proof.Destroyed, proofTeardown(final.Proof))
+				if err != nil || final.Proof == nil || !final.Proof.Destroyed || final.Proof.TeardownStatus != "destroyed" {
+					t.Errorf("delete %d ms after start: DeleteMachine() = proof %+v, err %v; want a destroyed proof", delay, final.Proof, err)
+				}
+				if out := rec.output(api.EventStdout); !booted && strings.Contains(out, c.StopMarker) {
+					t.Errorf("delete %d ms after start: an unbooted machine ran its process", delay)
+				}
+				checkNoMachineResources(t, rt, 5*time.Second)
+			}
+		})
+
 	})
 
 	t.Run("enforcer", func(t *testing.T) {
@@ -623,6 +708,39 @@ func runLive(t *testing.T, ctx context.Context, rt *Runtime, id string, slot int
 		t.Logf("events: %s", rec.dump())
 	}
 	return rec, res, dir
+}
+
+func proofTeardown(p *api.Proof) string {
+	if p == nil {
+		return ""
+	}
+	return p.TeardownStatus
+}
+
+// checkNoMachineResources waits up to d until no machine cgroup and no
+// machine jail of the runtime remain.
+func checkNoMachineResources(t *testing.T, rt *Runtime, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for {
+		var left []string
+		for _, dir := range []string{rt.cgroupParent(), filepath.Join(rt.cfg.JailBase, "firecracker")} {
+			entries, _ := os.ReadDir(dir)
+			for _, e := range entries {
+				if e.IsDir() && strings.HasPrefix(e.Name(), "vmcp-") {
+					left = append(left, filepath.Join(dir, e.Name()))
+				}
+			}
+		}
+		if len(left) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("machine resources remain: %v", left)
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func checkProof(t *testing.T, rt *Runtime, res machine.Result) {

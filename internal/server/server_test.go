@@ -170,7 +170,13 @@ func (i *fakeInstance) Done() <-chan struct{}  { return i.done }
 func (i *fakeInstance) Result() machine.Result { <-i.done; return i.result }
 func (i *fakeInstance) Destroy(_ context.Context, reason string) machine.Result {
 	if !i.booted.Load() {
-		i.finish(nil)
+		// Like the runtime, the proof of an unbooted machine names the
+		// destroy reason.
+		i.once.Do(func() {
+			i.result = machine.Result{Proof: api.Proof{MachineID: i.l.ID, Runtime: "fake", DestroyReason: reason,
+				Destroyed: true, TeardownStatus: "destroyed"}}
+			close(i.done)
+		})
 		return i.Result()
 	}
 	i.Kill(reason)

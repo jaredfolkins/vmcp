@@ -17,12 +17,19 @@ import (
 
 var stopTestConfig = flag.String("vmcp-stop-test-config", "testdata/stop.hujson", "HuJSON file for the stop test")
 
+// stopCase is one machine of the stop tests and what its record must show.
+type stopCase struct {
+	Program           string `json:"program"`
+	MachineName       string `json:"machine_name"`
+	DeadlineMS        int    `json:"deadline_ms"`
+	WantState         string `json:"want_state"`
+	WantExitReason    string `json:"want_exit_reason"`
+	WantDestroyReason string `json:"want_destroy_reason"`
+}
+
 type stopTestInput struct {
-	Program        string `json:"program"`
-	MachineName    string `json:"machine_name"`
-	DeadlineMS     int    `json:"deadline_ms"`
-	WantState      string `json:"want_state"`
-	WantExitReason string `json:"want_exit_reason"`
+	StopDuringProvision   stopCase `json:"stop_during_provision"`
+	DeleteDuringProvision stopCase `json:"delete_during_provision"`
 }
 
 func readStopInput(t *testing.T) stopTestInput {
@@ -41,37 +48,51 @@ func readStopInput(t *testing.T) stopTestInput {
 	if err := dec.Decode(&in); err != nil {
 		t.Fatal(err)
 	}
-	if in.Program == "" || in.MachineName == "" || in.DeadlineMS <= 0 || in.WantState == "" || in.WantExitReason == "" {
-		t.Fatal("stop test input is incomplete")
+	for name, c := range map[string]stopCase{"stop_during_provision": in.StopDuringProvision,
+		"delete_during_provision": in.DeleteDuringProvision} {
+		if c.Program == "" || c.MachineName == "" || c.DeadlineMS <= 0 || c.WantState == "" {
+			t.Fatalf("stop test input %s is incomplete", name)
+		}
 	}
 	return in
 }
 
-// TestStopDuringProvisionPreventsBoot proves that a stop that comes while
-// vmcp provisions a machine ends the machine before its guest boots. vmcp
-// only recorded the stop, because no instance existed yet. It then booted
-// the guest, which ran its process to the end or to its timeout.
-func TestStopDuringProvisionPreventsBoot(t *testing.T) {
-	in := readStopInput(t)
-	rt := &fakeRuntime{provisioning: make(chan struct{}), release: make(chan struct{})}
-	mgr, err := machine.New(context.Background(), rt, machine.Config{Dir: t.TempDir(), MaxMachines: 2})
+// newStopManager returns a manager over dir with rt and a context that ends
+// at the deadline of c.
+func newStopManager(t *testing.T, dir string, rt *fakeRuntime, c stopCase) (*machine.Manager, context.Context) {
+	t.Helper()
+	mgr, err := machine.New(context.Background(), rt, machine.Config{Dir: dir, MaxMachines: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(in.DeadlineMS)*time.Millisecond)
-	defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.DeadlineMS)*time.Millisecond)
+	t.Cleanup(cancel)
+	return mgr, ctx
+}
+
+// createStopMachine prepares an image and creates the machine of c without
+// starting it.
+func createStopMachine(t *testing.T, ctx context.Context, mgr *machine.Manager, c stopCase) api.Machine {
+	t.Helper()
 	img, err := mgr.CreateImage(ctx, api.ImageRequest{Ref: "example/app@sha256:" + string(bytes.Repeat([]byte("c"), 64))})
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := mgr.CreateMachine(ctx, api.MachineSpec{Name: in.MachineName, Lifecycle: api.Ephemeral, Image: img.ID,
-		TimeoutSeconds: 60, Process: api.Process{Args: []string{in.Program}}})
+	m, err := mgr.CreateMachine(ctx, api.MachineSpec{Name: c.MachineName, Lifecycle: api.Ephemeral, Image: img.ID,
+		TimeoutSeconds: 60, Process: api.Process{Args: []string{c.Program}}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	return m
+}
+
+// startWhileGated starts m in the background and waits until rt holds it in
+// Provision. The returned channel gets the Start result after release.
+func startWhileGated(t *testing.T, ctx context.Context, mgr *machine.Manager, rt *fakeRuntime, id string) <-chan error {
+	t.Helper()
 	started := make(chan error, 1)
 	go func() {
-		_, err := mgr.StartMachine(ctx, m.ID)
+		_, err := mgr.StartMachine(ctx, id)
 		started <- err
 	}()
 	select {
@@ -79,6 +100,19 @@ func TestStopDuringProvisionPreventsBoot(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("StartMachine did not provision the machine")
 	}
+	return started
+}
+
+// TestStopDuringProvisionPreventsBoot proves that a stop that comes while
+// vmcp provisions a machine ends the machine before its guest boots. vmcp
+// only recorded the stop, because no instance existed yet. It then booted
+// the guest, which ran its process to the end or to its timeout.
+func TestStopDuringProvisionPreventsBoot(t *testing.T) {
+	in := readStopInput(t).StopDuringProvision
+	rt := &fakeRuntime{provisioning: make(chan struct{}), release: make(chan struct{})}
+	mgr, ctx := newStopManager(t, t.TempDir(), rt, in)
+	m := createStopMachine(t, ctx, mgr, in)
+	started := startWhileGated(t, ctx, mgr, rt, m.ID)
 	if _, err := mgr.StopMachine(ctx, m.ID); err != nil {
 		t.Fatalf("StopMachine() error = %v", err)
 	}
@@ -113,5 +147,56 @@ func TestStopDuringProvisionPreventsBoot(t *testing.T) {
 	}
 	if _, err := mgr.DeleteMachine(context.Background(), m.ID); err != nil {
 		t.Errorf("DeleteMachine() error = %v", err)
+	}
+}
+
+// TestDeleteDuringProvisionNeverBoots proves that a delete that comes while
+// vmcp provisions a machine waits for the teardown, returns its proof, and
+// that the guest never boots. vmcp removed the record at once and returned
+// no proof, and the provisioned guest then booted with no record.
+func TestDeleteDuringProvisionNeverBoots(t *testing.T) {
+	in := readStopInput(t).DeleteDuringProvision
+	rt := &fakeRuntime{provisioning: make(chan struct{}), release: make(chan struct{})}
+	mgr, ctx := newStopManager(t, t.TempDir(), rt, in)
+	m := createStopMachine(t, ctx, mgr, in)
+	started := startWhileGated(t, ctx, mgr, rt, m.ID)
+	type deleted struct {
+		m   api.Machine
+		err error
+	}
+	deletes := make(chan deleted, 1)
+	go func() {
+		final, err := mgr.DeleteMachine(ctx, m.ID)
+		deletes <- deleted{final, err}
+	}()
+	// The delete must wait for the machine that vmcp still provisions.
+	select {
+	case d := <-deletes:
+		t.Errorf("DeleteMachine() returned during provisioning: state %s proof %+v, err %v", d.m.State, d.m.Proof, d.err)
+		deletes <- d
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(rt.release)
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("StartMachine did not return")
+	}
+	var d deleted
+	select {
+	case d = <-deletes:
+	case <-ctx.Done():
+		t.Fatal("DeleteMachine did not return")
+	}
+	if boots := rt.boots.Load(); boots != 0 {
+		t.Errorf("guest boots after a delete during provisioning = %d, want 0", boots)
+	}
+	if d.err != nil || string(d.m.State) != in.WantState || d.m.Proof == nil || !d.m.Proof.Destroyed ||
+		d.m.Proof.DestroyReason != in.WantDestroyReason {
+		t.Errorf("DeleteMachine() = state %s proof %+v, err %v; want state %s with a destroyed proof, reason %s",
+			d.m.State, d.m.Proof, d.err, in.WantState, in.WantDestroyReason)
+	}
+	if _, err := mgr.Machine(m.ID); err == nil {
+		t.Error("the deleted machine still has a record")
 	}
 }

@@ -801,17 +801,19 @@ func (m *Manager) DeleteMachine(ctx context.Context, id string) (api.Machine, er
 		return api.Machine{}, errorf(api.ErrNotFound, "machine not found")
 	}
 	m.mu.Lock()
-	inst, state := en.inst, en.rec.Machine.State
+	state := en.rec.Machine.State
 	m.mu.Unlock()
-	switch {
-	case inst != nil && state == api.StateRunning:
+	switch state {
+	case api.StateRunning:
+		// A machine in Provision has no instance yet. kill records the
+		// reason, and StartMachine destroys the machine before it boots.
 		m.kill(en, "deleted")
 		select {
 		case <-en.finished:
 		case <-ctx.Done():
 			return api.Machine{}, ctx.Err()
 		}
-	case state == api.StateCreated:
+	case api.StateCreated:
 		m.secrets.take(id)
 		m.finish(en, Result{Proof: api.Proof{MachineID: id, DestroyReason: "deleted", Destroyed: true, TeardownStatus: "destroyed"}})
 	}

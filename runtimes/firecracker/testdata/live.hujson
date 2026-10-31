@@ -29,4 +29,8 @@
   // jailer has no cgroup yet) and while the guest kernel boots.
   "stop_after_boot_ms": [0, 300],
   "stop_marker": "VMCP_LIVE_STOPPED_PROCESS_RAN",
+  // The manager subtest deletes a machine this many milliseconds after its
+  // start began. On the reference host Provision took less than 20 ms, so
+  // the short delays aim at it; the subtest logs the window that it hit.
+  "delete_after_start_ms": [0, 1, 2, 3, 5, 8, 13, 100],
 }
