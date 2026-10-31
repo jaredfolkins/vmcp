@@ -100,6 +100,9 @@ type entry struct {
 	output     int64
 	killReason string
 	finished   chan struct{}
+	// settled closes after finish saved the final record and closed the
+	// event log. A caller that removes the files of a machine waits for it.
+	settled chan struct{}
 }
 
 // record is the durable machine record. It never holds tokens or secret
@@ -174,7 +177,7 @@ func (m *Manager) load(ctx context.Context) (int, error) {
 		if err != nil {
 			return failed, err
 		}
-		en := &entry{rec: rec, events: ev, finished: make(chan struct{})}
+		en := &entry{rec: rec, events: ev, finished: make(chan struct{}), settled: make(chan struct{})}
 		switch rec.Machine.State {
 		case api.StateCreated, api.StateRunning, api.StateStopping:
 			en.rec.Machine.State = api.StateFailed
@@ -194,6 +197,7 @@ func (m *Manager) load(ctx context.Context) (int, error) {
 		}
 		ev.close()
 		close(en.finished)
+		close(en.settled)
 		m.machines[rec.Machine.ID] = en
 		m.names[rec.Machine.Name] = rec.Machine.ID
 	}
@@ -390,6 +394,7 @@ func (m *Manager) CreateMachine(ctx context.Context, spec api.MachineSpec) (api.
 			SpecHash: hash, Slot: slot, Spec: sanitize(spec),
 		},
 		finished: make(chan struct{}),
+		settled:  make(chan struct{}),
 	}
 	m.slots[slot] = id
 	m.machines[id] = en
@@ -830,11 +835,14 @@ func (m *Manager) DeleteMachine(ctx context.Context, id string) (api.Machine, er
 		// A machine in Provision has no instance yet. kill records the
 		// reason, and StartMachine destroys the machine before it boots.
 		m.kill(en, "deleted")
-		select {
-		case <-en.finished:
-		case <-ctx.Done():
-			return api.Machine{}, ctx.Err()
-		}
+	}
+	// Wait until finish saved the final record, also for a machine that
+	// ended just now. Otherwise that save can write the record again after
+	// the removal below.
+	select {
+	case <-en.settled:
+	case <-ctx.Done():
+		return api.Machine{}, ctx.Err()
 	}
 	m.mu.Lock()
 	en.rec.Machine.State = api.StateDestroyed
@@ -883,7 +891,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	var err error
 	for _, en := range running {
 		select {
-		case <-en.finished:
+		case <-en.settled:
 		case <-ctx.Done():
 			err = ctx.Err()
 		}
@@ -952,6 +960,7 @@ func (m *Manager) finish(en *entry, res Result) {
 	_ = m.save(en)
 	_ = en.events.append(api.Event{Kind: api.EventExit, Exit: exit, State: state})
 	en.events.close()
+	close(en.settled)
 	if log == nil {
 		log = m.log.With("machine", en.rec.Machine.ID, "machine_name", en.rec.Machine.Name)
 	}

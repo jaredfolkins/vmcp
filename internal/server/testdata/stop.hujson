@@ -40,4 +40,13 @@
     "want_exit_detail": "vmcp restarted",
     "want_destroy_reason": "vmcp-restarted",
   },
+  // Machines that are stopped and then deleted at once. A delete removes
+  // the record for good, so the next vmcp process loads none of them.
+  "delete_after_stop": {
+    "program": "hang",
+    "machine_name": "deleted-after-stop",
+    "deadline_ms": 10000,
+    "want_state": "destroyed",
+    "rounds": 50,
+  },
 }

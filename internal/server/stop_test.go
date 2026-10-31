@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -30,6 +31,8 @@ type stopCase struct {
 	WantDestroyReason string `json:"want_destroy_reason"`
 	WantStartStatus   int    `json:"want_start_status"`
 	WantStartCode     string `json:"want_start_code"`
+	// Rounds is how many machines a test repeats its steps with.
+	Rounds int `json:"rounds"`
 }
 
 type stopTestInput struct {
@@ -37,6 +40,7 @@ type stopTestInput struct {
 	DeleteDuringProvision stopCase `json:"delete_during_provision"`
 	StopBeforeStart       stopCase `json:"stop_before_start"`
 	Restart               stopCase `json:"restart"`
+	DeleteAfterStop       stopCase `json:"delete_after_stop"`
 }
 
 func readStopInput(t *testing.T) stopTestInput {
@@ -56,7 +60,8 @@ func readStopInput(t *testing.T) stopTestInput {
 		t.Fatal(err)
 	}
 	for name, c := range map[string]stopCase{"stop_during_provision": in.StopDuringProvision,
-		"delete_during_provision": in.DeleteDuringProvision, "stop_before_start": in.StopBeforeStart, "restart": in.Restart} {
+		"delete_during_provision": in.DeleteDuringProvision, "stop_before_start": in.StopBeforeStart, "restart": in.Restart,
+		"delete_after_stop": in.DeleteAfterStop} {
 		if c.Program == "" || c.MachineName == "" || c.DeadlineMS <= 0 || c.WantState == "" {
 			t.Fatalf("stop test input %s is incomplete", name)
 		}
@@ -274,8 +279,15 @@ func TestRestartGivesFailedMachinesAProof(t *testing.T) {
 	if _, err := old.StartMachine(ctx, m.ID); err != nil {
 		t.Fatal(err)
 	}
-	// The old process ends without a shutdown. Its guest stops later.
-	t.Cleanup(func() { _, _ = old.StopMachine(context.Background(), m.ID) })
+	// The old process ends without a shutdown. Its guest stops later, and
+	// the test waits for that stop so no record is written after t ends.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := old.Shutdown(ctx); err != nil {
+			t.Errorf("stop the machine of the old process: %v", err)
+		}
+	})
 
 	next, _ := newStopManager(t, dir, rt, in)
 	got, err := next.Machine(m.ID)
@@ -294,5 +306,41 @@ func TestRestartGivesFailedMachinesAProof(t *testing.T) {
 	}
 	if rt.recoveredCount() != 2 {
 		t.Errorf("runtime recoveries = %d, want 2", rt.recoveredCount())
+	}
+}
+
+// TestDeleteAfterStopLeavesNoRecord proves that a delete of a machine that a
+// stop is ending removes its record for good. finish saved the final record
+// after it signaled the end, so that save could write the record again after
+// the delete removed it, and the next vmcp process loaded a deleted machine.
+func TestDeleteAfterStopLeavesNoRecord(t *testing.T) {
+	in := readStopInput(t).DeleteAfterStop
+	if in.Rounds <= 0 {
+		t.Fatal("delete_after_stop needs rounds")
+	}
+	dir := t.TempDir()
+	rt := &fakeRuntime{}
+	mgr, ctx := newStopManager(t, dir, rt, in)
+	for i := range in.Rounds {
+		c := in
+		c.MachineName = fmt.Sprintf("%s-%d", in.MachineName, i)
+		m := createStopMachine(t, ctx, mgr, c)
+		if _, err := mgr.StartMachine(ctx, m.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := mgr.StopMachine(ctx, m.ID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := mgr.DeleteMachine(ctx, m.ID)
+		if err != nil {
+			t.Fatalf("DeleteMachine() error = %v", err)
+		}
+		if string(got.State) != in.WantState {
+			t.Fatalf("deleted machine state = %s, want %s", got.State, in.WantState)
+		}
+	}
+	next, _ := newStopManager(t, dir, rt, in)
+	if left := next.Machines(nil); len(left) != 0 {
+		t.Errorf("machines loaded after %d deletes = %d, want 0", in.Rounds, len(left))
 	}
 }
