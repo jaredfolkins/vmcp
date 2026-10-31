@@ -47,8 +47,11 @@ func lockCgroup(path string) (*os.File, error) {
 	return f, nil
 }
 
-// killCgroup kills every process in the cgroup and waits until it is
-// empty. A missing cgroup is not an error.
+// killCgroup kills every process in the cgroup and waits until the kernel
+// reports it unpopulated. cgroup.procs does not list the exiting non-leader
+// threads of a killed Firecracker, so it can read empty while the cgroup is
+// still populated, and Linux 6.1 then refuses to remove the cgroup with
+// EBUSY. A missing cgroup is not an error.
 func killCgroup(path string) error {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -58,8 +61,8 @@ func killCgroup(path string) error {
 	}
 	deadline := time.Now().Add(killWait)
 	for {
-		pids, err := cgroupPIDs(path)
-		if errors.Is(err, os.ErrNotExist) || (err == nil && len(pids) == 0) {
+		populated, err := cgroupPopulated(path)
+		if errors.Is(err, os.ErrNotExist) || (err == nil && !populated) {
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -75,6 +78,28 @@ func removeCgroup(path string) error {
 		return fmt.Errorf("remove cgroup: %w", err)
 	}
 	return nil
+}
+
+// cgroupPopulated reads the populated state of a cgroup from its
+// cgroup.events file.
+func cgroupPopulated(path string) (bool, error) {
+	b, err := os.ReadFile(filepath.Join(path, "cgroup.events"))
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		key, value, _ := strings.Cut(strings.TrimSpace(line), " ")
+		if key != "populated" {
+			continue
+		}
+		switch value {
+		case "0":
+			return false, nil
+		case "1":
+			return true, nil
+		}
+	}
+	return false, fmt.Errorf("cgroup %s events have no populated state", filepath.Base(path))
 }
 
 func cgroupPIDs(path string) ([]int, error) {

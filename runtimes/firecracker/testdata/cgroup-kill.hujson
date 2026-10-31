@@ -1,0 +1,11 @@
+// A killed machine cgroup. cgroup.procs does not list the exiting
+// non-leader threads of a killed Firecracker, so it can read empty while
+// cgroup.events still reports "populated 1". Linux 6.1 refuses to remove the
+// cgroup in that state with EBUSY. A 1 GiB, 8-thread process on kernel 7.0
+// stayed populated for up to 48 ms after cgroup.procs read empty.
+{
+  "exit_window_ms": 60,
+  "procs": "",
+  "events_populated": "populated 1\nfrozen 0\n",
+  "events_unpopulated": "populated 0\nfrozen 0\n"
+}

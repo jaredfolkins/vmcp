@@ -159,11 +159,11 @@ func (k kernelHost) killCgroup(path string) error {
 	}
 	deadline := time.Now().Add(killWait)
 	for {
-		b, err := os.ReadFile(filepath.Join(path, "cgroup.events"))
+		populated, err := cgroupPopulated(path)
 		if err != nil {
 			return fmt.Errorf("read cgroup events of %s: %w", path, err)
 		}
-		if bytes.Contains(b, []byte("populated 0")) {
+		if !populated {
 			return nil
 		}
 		if time.Now().After(deadline) {
