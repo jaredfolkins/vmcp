@@ -617,6 +617,11 @@ func (m *Manager) StartMachine(ctx context.Context, id string) (api.Machine, err
 		}
 		return api.Machine{}, errorf(api.ErrConflict, "machine is %s", mach.State)
 	}
+	if en.killReason != "" {
+		// A stop or a delete came first. kill ends the machine.
+		m.mu.Unlock()
+		return api.Machine{}, errorf(api.ErrConflict, "machine was stopped before it started")
+	}
 	en.rec.Machine.State = api.StateRunning
 	en.traceCtx = trace.Detach(ctx)
 	en.startedAt = time.Now()
@@ -779,14 +784,23 @@ func (m *Manager) StopMachine(ctx context.Context, id string) (api.Machine, erro
 	return m.Machine(id)
 }
 
+// kill records the first kill reason of a created or running machine and
+// stops it. A created machine never started, so kill ends it at once with a
+// proof, and a later start is refused. A running machine that has no
+// instance yet is still in Provision; StartMachine destroys it there.
 func (m *Manager) kill(en *entry, reason string) {
 	m.mu.Lock()
-	inst := en.inst
-	if en.killReason == "" && en.rec.Machine.State == api.StateRunning {
+	inst, state := en.inst, en.rec.Machine.State
+	if en.killReason == "" && (state == api.StateRunning || state == api.StateCreated) {
 		en.killReason = reason
 	}
 	m.mu.Unlock()
-	if inst != nil {
+	switch {
+	case state == api.StateCreated:
+		m.secrets.take(en.rec.Machine.ID)
+		m.finish(en, Result{Proof: api.Proof{MachineID: en.rec.Machine.ID, DestroyReason: reason, Destroyed: true,
+			TeardownStatus: "destroyed"}})
+	case inst != nil:
 		inst.Kill(reason)
 	}
 }
@@ -803,8 +817,7 @@ func (m *Manager) DeleteMachine(ctx context.Context, id string) (api.Machine, er
 	m.mu.Lock()
 	state := en.rec.Machine.State
 	m.mu.Unlock()
-	switch state {
-	case api.StateRunning:
+	if state == api.StateCreated || state == api.StateRunning {
 		// A machine in Provision has no instance yet. kill records the
 		// reason, and StartMachine destroys the machine before it boots.
 		m.kill(en, "deleted")
@@ -813,9 +826,6 @@ func (m *Manager) DeleteMachine(ctx context.Context, id string) (api.Machine, er
 		case <-ctx.Done():
 			return api.Machine{}, ctx.Err()
 		}
-	case api.StateCreated:
-		m.secrets.take(id)
-		m.finish(en, Result{Proof: api.Proof{MachineID: id, DestroyReason: "deleted", Destroyed: true, TeardownStatus: "destroyed"}})
 	}
 	m.mu.Lock()
 	en.rec.Machine.State = api.StateDestroyed

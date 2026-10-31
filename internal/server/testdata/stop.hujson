@@ -17,4 +17,16 @@
     "want_state": "destroyed",
     "want_destroy_reason": "deleted",
   },
+  // A machine that is stopped before it is started. The stop ends it, and
+  // the API refuses a later start with HTTP 409 and the conflict code.
+  "stop_before_start": {
+    "program": "hang",
+    "machine_name": "stopped-before-start",
+    "deadline_ms": 2000,
+    "want_state": "exited",
+    "want_exit_reason": "stopped",
+    "want_destroy_reason": "stopped",
+    "want_start_status": 409,
+    "want_start_code": "conflict",
+  },
 }

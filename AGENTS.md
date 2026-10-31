@@ -343,6 +343,11 @@ each machine leaves a zombie Firecracker process. Do not add `--init`.
   output limit, or is stopped. The machine then has state `exited` and a
   proof. Its writable drives stay readable until the caller deletes the
   machine.
+- A stop or a delete of a machine that was not started ends it at once
+  with state `exited`, exit reason `stopped`, and a proof. A later start
+  answers HTTP 409 with the code `conflict`. A stop or a delete during the
+  start ends the machine before or right after the guest boots; the guest
+  process does not run.
 - `TimeoutSeconds` is required.
 
 ### Persistent

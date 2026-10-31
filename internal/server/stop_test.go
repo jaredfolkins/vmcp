@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"os"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/tailscale/hujson"
 
 	"github.com/jaredfolkins/vmcp/api"
+	"github.com/jaredfolkins/vmcp/client"
 	"github.com/jaredfolkins/vmcp/internal/machine"
 )
 
@@ -25,11 +27,14 @@ type stopCase struct {
 	WantState         string `json:"want_state"`
 	WantExitReason    string `json:"want_exit_reason"`
 	WantDestroyReason string `json:"want_destroy_reason"`
+	WantStartStatus   int    `json:"want_start_status"`
+	WantStartCode     string `json:"want_start_code"`
 }
 
 type stopTestInput struct {
 	StopDuringProvision   stopCase `json:"stop_during_provision"`
 	DeleteDuringProvision stopCase `json:"delete_during_provision"`
+	StopBeforeStart       stopCase `json:"stop_before_start"`
 }
 
 func readStopInput(t *testing.T) stopTestInput {
@@ -49,7 +54,7 @@ func readStopInput(t *testing.T) stopTestInput {
 		t.Fatal(err)
 	}
 	for name, c := range map[string]stopCase{"stop_during_provision": in.StopDuringProvision,
-		"delete_during_provision": in.DeleteDuringProvision} {
+		"delete_during_provision": in.DeleteDuringProvision, "stop_before_start": in.StopBeforeStart} {
 		if c.Program == "" || c.MachineName == "" || c.DeadlineMS <= 0 || c.WantState == "" {
 			t.Fatalf("stop test input %s is incomplete", name)
 		}
@@ -198,5 +203,55 @@ func TestDeleteDuringProvisionNeverBoots(t *testing.T) {
 	}
 	if _, err := mgr.Machine(m.ID); err == nil {
 		t.Error("the deleted machine still has a record")
+	}
+}
+
+// TestStopBeforeStartPreventsStart proves the API of a stop before start:
+// the stop ends the machine with a proof and an exit event, and a later
+// start fails with HTTP 409 and the conflict code. vmcp ignored such a
+// stop, and the start booted the guest.
+func TestStopBeforeStartPreventsStart(t *testing.T) {
+	in := readStopInput(t).StopBeforeStart
+	if in.WantStartStatus == 0 || in.WantStartCode == "" || in.WantExitReason == "" || in.WantDestroyReason == "" {
+		t.Fatal("stop_before_start needs want_start_status, want_start_code, want_exit_reason, and want_destroy_reason")
+	}
+	h := newHarness(t, t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(in.DeadlineMS)*time.Millisecond)
+	defer cancel()
+	img := h.image(t)
+	m, err := h.c.CreateMachine(ctx, api.MachineSpec{Name: in.MachineName, Lifecycle: api.Ephemeral, Image: img,
+		TimeoutSeconds: 60, Process: api.Process{Args: []string{in.Program}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stopped, err := h.c.StopMachine(ctx, m.ID, api.StopRequest{})
+	if err != nil {
+		t.Fatalf("StopMachine() error = %v", err)
+	}
+	if string(stopped.State) != in.WantState || stopped.Exit == nil || string(stopped.Exit.Reason) != in.WantExitReason ||
+		stopped.Proof == nil || !stopped.Proof.Destroyed || stopped.Proof.DestroyReason != in.WantDestroyReason {
+		t.Errorf("StopMachine() = state %s exit %+v proof %+v; want state %s, exit %s, a destroyed proof with reason %s",
+			stopped.State, stopped.Exit, stopped.Proof, in.WantState, in.WantExitReason, in.WantDestroyReason)
+	}
+	_, err = h.c.StartMachine(ctx, m.ID)
+	var apiErr *client.Error
+	if !errors.As(err, &apiErr) || apiErr.Status != in.WantStartStatus || string(apiErr.Code) != in.WantStartCode {
+		t.Errorf("StartMachine() after stop error = %v, want HTTP %d %s", err, in.WantStartStatus, in.WantStartCode)
+	}
+	if boots := h.rt.boots.Load(); boots != 0 {
+		t.Errorf("guest boots after a stop before start = %d, want 0", boots)
+	}
+	var exit *api.Exit
+	if err := h.c.Events(ctx, m.ID, 0, true, func(ev api.Event) error {
+		if ev.Kind == api.EventExit {
+			exit = ev.Exit
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("event stream did not end: %v", err)
+	}
+	if exit == nil || string(exit.Reason) != in.WantExitReason {
+		t.Errorf("stream exit = %+v, want reason %s", exit, in.WantExitReason)
 	}
 }

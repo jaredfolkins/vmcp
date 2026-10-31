@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -328,6 +329,27 @@ func TestLiveFirecracker(t *testing.T) {
 				Resources: api.Resources{VCPUs: 1, MemoryMiB: 256, DiskMiB: 256},
 				Process:   api.Process{Args: []string{"/bin/sh", "-c", fmt.Sprintf("echo %s; sleep 600", c.StopMarker)}}}
 		}
+
+		// A stop before start ends the machine with a proof; the start is
+		// refused and nothing boots.
+		t.Run("stop-before-start", func(t *testing.T) {
+			m, err := mgr.CreateMachine(ctx, spec("live-stop-before-start"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			stopped, err := mgr.StopMachine(ctx, m.ID)
+			if err != nil || stopped.State != api.StateExited || stopped.Proof == nil || !stopped.Proof.Destroyed {
+				t.Errorf("StopMachine() = state %s proof %+v, err %v; want exited with a destroyed proof", stopped.State, stopped.Proof, err)
+			}
+			var merr *machine.Error
+			if _, err := mgr.StartMachine(ctx, m.ID); !errors.As(err, &merr) || merr.Code != api.ErrConflict {
+				t.Errorf("StartMachine() after stop error = %v, want %s", err, api.ErrConflict)
+			}
+			if _, err := mgr.DeleteMachine(ctx, m.ID); err != nil {
+				t.Errorf("DeleteMachine() error = %v", err)
+			}
+			checkNoMachineResources(t, rt, 0)
+		})
 
 		// A delete during start returns a destroyed proof. A guest that
 		// had not booted never boots, and nothing is left.
