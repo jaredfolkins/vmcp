@@ -25,6 +25,12 @@ that every item follows.
   live gate and the end-to-end gate pass with no AppArmor denial. Commits
   `a8262bb` and `cf751c1`.
 
+- **Graceful stop.** A stop, a timeout, and an output limit end the
+  process with SIGTERM and SIGKILL after the grace, and the agent sends the
+  drive tars, so a write of the last seconds is kept. The live gate passes
+  with `drive-export/stop` and `manager/graceful-after-write/{stop,timeout,
+  output-limit}`. Commit `0320a64`.
+
 - **Drive export after every end.** A machine that ended without its drive
   tars (a timeout, an output limit, a stop, or a guest failure) gets an
   export guest on the same drive images before teardown, so its writable

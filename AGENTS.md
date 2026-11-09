@@ -159,6 +159,14 @@
   added about one second, and its jail was gone after teardown. The kernel
   log had zero `apparmor="DENIED"` lines for `vmcp-live-gate` and no
   suppressed audit line.
+- The graceful stop. Live evidence on 2026-11-09, commit `0320a64`, on the
+  same host, with `scripts/live-gate.sh`: `TestLiveFirecracker` passed all
+  subtests. A write about one second before a stop, a timeout, or an output
+  limit, with no `sync`, stayed in the drive tar through the agent drive
+  path, with no export. A process that ignored SIGTERM ended with SIGKILL
+  after a 1-second grace (exit 137) and kept its write. A guest failure
+  still used the export. The kernel log had zero `apparmor="DENIED"` lines
+  for `vmcp-live-gate` and no suppressed audit line.
 - `runtimes/firecracker/release/` bakes in Firecracker `1.16.0` and jailer
   `1.16.0`, linux/amd64, verified against the upstream archive.
 - `runtimes/firecracker/installers/` has Debian 12 and Ubuntu 24.04 amd64 host
