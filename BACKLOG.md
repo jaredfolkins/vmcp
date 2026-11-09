@@ -25,6 +25,12 @@ that every item follows.
   live gate and the end-to-end gate pass with no AppArmor denial. Commits
   `a8262bb` and `cf751c1`.
 
+- **Drive export after every end.** A machine that ended without its drive
+  tars (a timeout, an output limit, a stop, or a guest failure) gets an
+  export guest on the same drive images before teardown, so its writable
+  drives stay readable. The live gate passes with the subtests
+  `drive-export/stop` and `drive-export/guest-failure`. Commit `0641e07`.
+
 - **Gateway broker and flow events.** `network.gateway` sends a guest's
   other TCP and UDP traffic to a Go broker with nftables TPROXY, with no
   forwarding and no NAT. The broker connects only to public addresses.

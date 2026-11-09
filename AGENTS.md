@@ -150,6 +150,15 @@
   denied flow event and an `egress_denied` line, and no gateway element
   stayed after teardown. The kernel log had zero `apparmor="DENIED"` lines
   for `vmcp-live-gate` and no suppressed audit line.
+- The drive export (see [Firecracker rules](#firecracker-rules)). Live
+  evidence on 2026-11-09, commit `0641e07`, on the same Ubuntu 24.04 host
+  with kernel 7.0, with `scripts/live-gate.sh`: `TestLiveFirecracker`
+  passed all subtests. In `drive-export/stop`, a stopped guest kept the file
+  that it wrote to a writable drive. In `drive-export/guest-failure`, a
+  guest that ran `reboot -f` reported no exit and kept the file. Each export
+  added about one second, and its jail was gone after teardown. The kernel
+  log had zero `apparmor="DENIED"` lines for `vmcp-live-gate` and no
+  suppressed audit line.
 - `runtimes/firecracker/release/` bakes in Firecracker `1.16.0` and jailer
   `1.16.0`, linux/amd64, verified against the upstream archive.
 - `runtimes/firecracker/installers/` has Debian 12 and Ubuntu 24.04 amd64 host
