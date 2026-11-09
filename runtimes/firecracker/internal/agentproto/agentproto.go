@@ -17,8 +17,9 @@ import (
 	"io"
 )
 
-// Version is the protocol version in Hello and Config.
-const Version = 2
+// Version is the protocol version in Hello and Config. Version 3 adds
+// Config.Export.
+const Version = 3
 
 // Guest paths and devices.
 const (
@@ -67,6 +68,11 @@ type Config struct {
 	// DNS is the resolver address for /etc/resolv.conf. Empty means no
 	// DNS.
 	DNS string `json:"dns,omitempty"`
+	// Export selects the drive export guest. The agent runs no process. It
+	// mounts each writable drive, sends its tar, and then sends Done with
+	// no Exit. The host boots this guest on the drives of a guest that
+	// ended without sending them.
+	Export bool `json:"export,omitempty"`
 }
 
 // Drive is one spec drive.

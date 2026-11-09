@@ -257,6 +257,80 @@ func TestLiveFirecracker(t *testing.T) {
 		checkProof(t, rt, res)
 	})
 
+	// A machine keeps its writable drives after a stop and after a guest
+	// failure. The guest agent sends drive tars only after its process
+	// exits, so vmcp boots an export guest on the drive images. Without it,
+	// the drive writes of a stopped or failed guest were lost.
+	t.Run("drive-export", func(t *testing.T) {
+		spec := api.MachineSpec{
+			Drives:    []api.Drive{{Name: "out", GuestPath: "/out", SizeMiB: 16, Writable: true}},
+			Resources: api.Resources{VCPUs: 1, MemoryMiB: 256, DiskMiB: 256},
+		}
+		check := func(t *testing.T, res machine.Result, dir string) {
+			t.Helper()
+			if got := tarFile(t, filepath.Join(dir, "out", "out.tar"), "f"); got != "kept\n" {
+				t.Errorf("out drive file f = %q, want kept", got)
+			}
+			export, _ := res.Proof.Detail["drive_export"].(map[string]any)
+			if export["status"] != "completed" || export["teardown"] != "destroyed" {
+				t.Errorf("proof drive_export = %v, want completed and destroyed", export)
+			}
+			jail, _ := res.Proof.Detail["jail_id"].(string)
+			if _, err := os.Lstat(filepath.Join(rt.cfg.JailBase, "firecracker", jail+"x")); err == nil {
+				t.Errorf("export jail %sx remains", jail)
+			}
+			checkProof(t, rt, res)
+		}
+		t.Run("stop", func(t *testing.T) {
+			id := "m-de00000000000001"
+			dir := filepath.Join(rt.machinesDir(), id)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			rec := &recorder{}
+			inst, err := rt.Provision(ctx, machine.Launch{
+				ID: id, Slot: 6, Dir: dir, ImageID: "img-live", Spec: spec,
+				Args: []string{"/bin/sh", "-c", "echo kept > /out/f; sync; echo written; sleep 600"},
+				Env:  []string{"PATH=/bin:/usr/bin"}, WorkDir: "/", Sink: rec,
+			})
+			if err != nil {
+				t.Fatalf("Provision() error = %v", err)
+			}
+			m := inst.(*Machine)
+			if err := m.Boot(ctx); err != nil {
+				t.Fatalf("Boot() error = %v", err)
+			}
+			waitFor(t, time.Minute, "the drive write", func() bool {
+				return strings.Contains(rec.output(api.EventStdout), "written")
+			})
+			mark := logs.mark()
+			m.Kill("stopped")
+			res := waitKilled(t, m, 2*time.Minute)
+			if res.Exit != nil {
+				t.Errorf("exit = %+v, want none: the stop killed the process", res.Exit)
+			}
+			logs.mu.Lock()
+			after := logs.buf.String()[mark:]
+			logs.mu.Unlock()
+			if !strings.Contains(after, `"msg":"drives exported"`) {
+				t.Errorf("log after the stop has no drives exported line")
+			}
+			check(t, res, dir)
+		})
+		t.Run("guest-failure", func(t *testing.T) {
+			// reboot -f ends the guest at once, as a kernel panic does: the
+			// agent reports no exit and sends no drive tar.
+			s := spec
+			s.Process = api.Process{Args: []string{"/bin/sh", "-c", "echo kept > /out/f; sync; reboot -f; sleep 600"}}
+			_, res, dir := runLive(t, ctx, rt, "m-de00000000000002", 7, s, "")
+			if res.Exit != nil {
+				t.Errorf("exit = %+v, want none: the guest failed", res.Exit)
+			}
+			check(t, res, dir)
+		})
+	})
+
 	// A stop during boot must end the machine before its process runs and
 	// remove every resource. A kill before the jailer created the cgroup
 	// found no process, so the guest ran its process. A kill during boot

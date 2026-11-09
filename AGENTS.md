@@ -342,7 +342,8 @@ each machine leaves a zombie Firecracker process. Do not add `--init`.
 - vmcp destroys the guest when the process exits, times out, exceeds its
   output limit, or is stopped. The machine then has state `exited` and a
   proof. Its writable drives stay readable until the caller deletes the
-  machine.
+  machine. This is also true after a guest failure, such as a kernel panic.
+  A delete, a security kill, and a vmcp stop discard the drives.
 - A stop or a delete of a machine that was not started ends it at once
   with state `exited`, exit reason `stopped`, and a proof. A later start
   answers HTTP 409 with the code `conflict`. A stop or a delete during the
@@ -436,6 +437,14 @@ A caller uses vmcp in this order. Each step is a general API feature.
 - Host and guest talk only over vsock. The guest agent sends events and the
   tar of each writable drive to the host. The host never mounts or parses a
   guest ext4 image.
+- The agent sends the drive tars only after its process exits. When a guest
+  ended without them, after a timeout, an output limit, a stop, or a guest
+  failure, vmcp boots an export guest before teardown. It has its own jail,
+  the slot and UID of the machine, hard links to the drive images, no
+  network, no upper disk, no files, and no secrets. Its agent runs no
+  process: it mounts the drives, which replays their journals, sends the
+  tars, and sends no exit. The proof detail `drive_export` records it, and a
+  partial export teardown makes the machine teardown partial.
 - Keep the jail base path short, such as `/var/lib/vmcp/jail`. A Unix socket
   path in a jail must stay under the 108-byte limit.
 - Guest network: one tap device per machine in the vmcp network namespace,

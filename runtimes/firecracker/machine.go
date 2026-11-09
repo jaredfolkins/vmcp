@@ -31,6 +31,10 @@ import (
 	"github.com/jaredfolkins/vmcp/runtimes/firecracker/internal/image"
 )
 
+// guestBootArgs are the kernel arguments of every guest. A guest that panics
+// or reboots ends its Firecracker process.
+const guestBootArgs = "console=ttyS0 reboot=k panic=1 pci=off init=" + agentproto.InitPath
+
 const (
 	serialLogLimit  = 1 << 20
 	memoryOverhead  = 128
@@ -64,6 +68,8 @@ type Machine struct {
 	// secrets go to the guest once, after its Hello, and are then cleared.
 	// They are never written to disk.
 	secrets *agentproto.Secrets
+	// export marks the drive export guest of another machine (export.go).
+	export bool
 
 	mu         sync.Mutex
 	booted     bool
@@ -271,7 +277,7 @@ func (m *Machine) writeConfigs() error {
 	}
 	clear(raw)
 
-	bootArgs := "console=ttyS0 reboot=k panic=1 pci=off init=" + agentproto.InitPath
+	bootArgs := guestBootArgs
 	if m.net != nil {
 		bootArgs += " " + m.net.kernelIPArg()
 	}
@@ -346,6 +352,24 @@ func (m *Machine) listen() error {
 	return nil
 }
 
+// closeListeners closes the vsock listeners and waits for their readers. It
+// is safe to call more than once.
+func (m *Machine) closeListeners() {
+	for _, ln := range m.lns {
+		_ = ln.Close()
+	}
+	m.listenWG.Wait()
+}
+
+// serialLogName is the serial console file in the machine directory. The
+// export guest has its own, so that the console of the first guest stays.
+func (m *Machine) serialLogName() string {
+	if m.export {
+		return "export-serial.log"
+	}
+	return "serial.log"
+}
+
 // Boot starts the jailer. Firecracker boots from the config file.
 func (m *Machine) Boot(ctx context.Context) error {
 	m.mu.Lock()
@@ -379,7 +403,7 @@ func (m *Machine) Boot(ctx context.Context) error {
 		"--new-pid-ns",
 		"--", "--config-file", "/config.json", "--api-sock", "/fc.sock",
 	}
-	serial, err := os.OpenFile(filepath.Join(m.spec.Dir, "serial.log"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	serial, err := os.OpenFile(filepath.Join(m.spec.Dir, m.serialLogName()), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
@@ -459,7 +483,14 @@ func (m *Machine) finish(ctx context.Context, reason string) {
 		m.killReason = reason
 	}
 	m.mu.Unlock()
+	// A drive tar that is still arriving is complete after the listeners
+	// close. Only then does the export see which tars are missing.
+	m.closeListeners()
+	export := m.exportDrives(ctx)
 	status := m.teardown(ctx)
+	if export != nil && export.teardown != "destroyed" {
+		status = "partial"
+	}
 	m.mu.Lock()
 	destroyReason := m.killReason
 	if destroyReason == "" {
@@ -473,6 +504,9 @@ func (m *Machine) finish(ctx context.Context, reason string) {
 	}
 	if m.posture != nil {
 		detail["posture"] = m.posture
+	}
+	if export != nil {
+		detail["drive_export"] = export.detail()
 	}
 	m.result = machine.Result{
 		Exit: m.exit,
@@ -521,10 +555,7 @@ func (m *Machine) teardown(ctx context.Context) string {
 	}
 	step("kill-cgroup", killCgroup(m.cgroup))
 	step("remove-cgroup", removeCgroup(m.cgroup))
-	for _, ln := range m.lns {
-		_ = ln.Close()
-	}
-	m.listenWG.Wait()
+	m.closeListeners()
 	m.brokers.close()
 	if m.net != nil {
 		step("remove-tap", removeTap(ctx, *m.net, m.tag))

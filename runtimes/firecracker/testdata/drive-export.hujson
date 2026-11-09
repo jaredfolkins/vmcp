@@ -1,0 +1,23 @@
+// The drive export of a machine that ended without its drive tars.
+{
+  // Kill reasons after which a machine keeps its writable drives: a guest
+  // that ended by itself, a timeout, an output limit, and a stop.
+  "keep_reasons": ["", "timeout", "output-limit", "stopped"],
+  // Kill reasons after which it does not: a delete, a vmcp stop, the two
+  // security kills, a failed boot, and an unknown reason.
+  "drop_reasons": ["deleted", "vmcp-stopping", "posture-violation", "enforcer", "boot-failed", "test-cleanup"],
+  // Two writable drives and one read-only drive. Only "out" has a tar.
+  "drives": [
+    {"name": "out", "guest_path": "/out", "size_mib": 64, "writable": true},
+    {"name": "state", "guest_path": "/work/state", "size_mib": 2048, "writable": true},
+    {"name": "in", "guest_path": "/in", "size_mib": 16, "writable": false}
+  ],
+  "tars": ["out"],
+  // The export needs drive 1 only. It is the first export device.
+  "want_missing": [1],
+  "want_devices": ["/dev/vdc"],
+  // 60 s for the boot and the mounts, and 2048 MiB at 16 MiB/s.
+  "want_timeout_seconds": 188,
+  // The code of the WARN line when the export guest cannot run.
+  "failure_code": "drive_export_failed"
+}

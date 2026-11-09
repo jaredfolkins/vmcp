@@ -46,40 +46,48 @@ func main() {
 		_, _ = fmt.Fprintln(console, "vmcp-agent: event channel:", err)
 		halt()
 	}
-	code, runErr := run(ev)
+	code, export, runErr := run(ev)
 	if runErr != nil {
 		ev.send(agentproto.Message{Type: agentproto.TypeStep, Step: "agent", Status: "failed", Detail: runErr.Error()})
 		code = 127
 	}
-	ev.send(agentproto.Message{Type: agentproto.TypeExit, Code: code})
+	// An export guest runs no process, so it reports no exit.
+	if !export {
+		ev.send(agentproto.Message{Type: agentproto.TypeExit, Code: code})
+	}
 	ev.send(agentproto.Message{Type: agentproto.TypeDone})
 	ev.close()
 	halt()
 }
 
-func run(ev *events) (int, error) {
+// run runs the process, or the drive export when the configuration selects
+// it. export reports that the configuration selected the export.
+func run(ev *events) (code int, export bool, err error) {
 	if err := mountBase(); err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	ev.send(agentproto.Message{Type: agentproto.TypeHello, Version: agentproto.Version})
 	secrets, err := ev.readSecrets()
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	defer secrets.Clear()
 	cfg, err := readConfig()
 	if err != nil {
-		return 0, err
+		return 0, false, err
+	}
+	if cfg.Export {
+		return 0, true, exportDrives(cfg)
 	}
 	if err := buildRoot(cfg, secrets); err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	// Secret entries come last, so they replace a same-named entry.
 	cfg.Env = append(cfg.Env, secrets.Env...)
 	ev.send(agentproto.Message{Type: agentproto.TypeStep, Step: "start-process", Status: "running"})
-	code, err := runProcess(cfg, ev)
+	code, err = runProcess(cfg, ev)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	ev.send(agentproto.Message{Type: agentproto.TypeStep, Step: "start-process", Status: "completed"})
 	for _, d := range cfg.Drives {
@@ -87,10 +95,10 @@ func run(ev *events) (int, error) {
 			continue
 		}
 		if err := sendDrive(d); err != nil {
-			return 0, fmt.Errorf("send drive %s: %w", d.Name, err)
+			return 0, false, fmt.Errorf("send drive %s: %w", d.Name, err)
 		}
 	}
-	return code, nil
+	return code, false, nil
 }
 
 func openConsole() io.Writer {
