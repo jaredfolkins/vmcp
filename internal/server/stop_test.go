@@ -125,7 +125,7 @@ func TestStopDuringProvisionPreventsBoot(t *testing.T) {
 	mgr, ctx := newStopManager(t, t.TempDir(), rt, in)
 	m := createStopMachine(t, ctx, mgr, in)
 	started := startWhileGated(t, ctx, mgr, rt, m.ID)
-	if _, err := mgr.StopMachine(ctx, m.ID); err != nil {
+	if _, err := mgr.StopMachine(ctx, m.ID, api.StopRequest{}); err != nil {
 		t.Fatalf("StopMachine() error = %v", err)
 	}
 	close(rt.release)
@@ -328,7 +328,7 @@ func TestDeleteAfterStopLeavesNoRecord(t *testing.T) {
 		if _, err := mgr.StartMachine(ctx, m.ID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := mgr.StopMachine(ctx, m.ID); err != nil {
+		if _, err := mgr.StopMachine(ctx, m.ID, api.StopRequest{}); err != nil {
 			t.Fatal(err)
 		}
 		got, err := mgr.DeleteMachine(ctx, m.ID)

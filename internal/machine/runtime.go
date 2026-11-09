@@ -6,6 +6,7 @@ package machine
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/jaredfolkins/vmcp/api"
 )
@@ -33,6 +34,11 @@ type Instance interface {
 	Boot(ctx context.Context) error
 	// Kill stops the guest at once. It is safe to call more than once.
 	Kill(reason string)
+	// Stop ends the guest process gracefully: SIGTERM, and SIGKILL after
+	// grace. The writable drives are then sent as after a process exit. It
+	// kills the guest when a graceful stop cannot happen. The first stop or
+	// kill reason stays.
+	Stop(reason string, grace time.Duration)
 	// Done is closed after the machine ended and its resources are gone.
 	Done() <-chan struct{}
 	Result() Result

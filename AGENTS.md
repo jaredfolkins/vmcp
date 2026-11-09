@@ -353,6 +353,14 @@ each machine leaves a zombie Firecracker process. Do not add `--init`.
   proof. Its writable drives stay readable until the caller deletes the
   machine. This is also true after a guest failure, such as a kernel panic.
   A delete, a security kill, and a vmcp stop discard the drives.
+- A stop, a timeout, and an output limit end the process gracefully. The
+  agent sends SIGTERM to the process group and SIGKILL when it still runs
+  after the grace: the stop request `timeout_seconds` (1 to 300, default 10),
+  or 10 seconds for a timeout and an output limit. The agent then sends the
+  drive tars, which read the guest page cache, so no recent write is lost.
+  vmcp kills the guest when the agent cannot take the request or the guest
+  has not ended after the grace and the drive time (`stop_forced`). A delete
+  and a vmcp stop kill at once.
 - A stop or a delete of a machine that was not started ends it at once
   with state `exited`, exit reason `stopped`, and a proof. A later start
   answers HTTP 409 with the code `conflict`. A stop or a delete during the
@@ -446,6 +454,8 @@ A caller uses vmcp in this order. Each step is a general API feature.
 - Host and guest talk only over vsock. The guest agent sends events and the
   tar of each writable drive to the host. The host never mounts or parses a
   guest ext4 image.
+- The host sends the agent two kinds of messages on the event connection:
+  one Secrets message after Hello, and later a stop request with a grace.
 - The agent sends the drive tars only after its process exits. When a guest
   ended without them, after a timeout, an output limit, a stop, or a guest
   failure, vmcp boots an export guest before teardown. It has its own jail,

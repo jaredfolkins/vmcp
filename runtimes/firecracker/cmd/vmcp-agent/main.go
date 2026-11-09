@@ -72,6 +72,8 @@ func run(ev *events) (code int, export bool, err error) {
 		return 0, false, err
 	}
 	defer secrets.Clear()
+	stop := &stopper{}
+	go ev.readHostMessages(stop)
 	cfg, err := readConfig()
 	if err != nil {
 		return 0, false, err
@@ -85,7 +87,7 @@ func run(ev *events) (code int, export bool, err error) {
 	// Secret entries come last, so they replace a same-named entry.
 	cfg.Env = append(cfg.Env, secrets.Env...)
 	ev.send(agentproto.Message{Type: agentproto.TypeStep, Step: "start-process", Status: "running"})
-	code, err = runProcess(cfg, ev)
+	code, err = runProcess(cfg, ev, stop)
 	if err != nil {
 		return 0, false, err
 	}
@@ -240,7 +242,7 @@ func mountAt(src, dst, fstype string, flags uintptr, data string) error {
 
 // runProcess starts the process in the merged root and reaps every child
 // until the process exits. It returns the process exit code.
-func runProcess(cfg agentproto.Config, ev *events) (int, error) {
+func runProcess(cfg agentproto.Config, ev *events, stop *stopper) (int, error) {
 	if len(cfg.Args) == 0 {
 		return 0, errors.New("process has no arguments")
 	}
@@ -294,11 +296,13 @@ func runProcess(cfg agentproto.Config, ev *events) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("start process: %w", err)
 	}
+	stop.started(proc.Pid)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go stream(&wg, stdoutR, agentproto.TypeStdout, ev)
 	go stream(&wg, stderrR, agentproto.TypeStderr, ev)
 	code := reap(proc.Pid)
+	stop.exited()
 	wg.Wait()
 	return code, nil
 }
@@ -456,12 +460,15 @@ type events struct {
 	mu   sync.Mutex
 	conn *os.File
 	enc  *json.Encoder
+	// r reads the host messages. One reader keeps a message that arrives
+	// right after Secrets in its buffer.
+	r *bufio.Reader
 }
 
 // readSecrets reads the one Secrets message that the host sends after
 // Hello.
 func (e *events) readSecrets() (*agentproto.Secrets, error) {
-	line, err := bufio.NewReaderSize(io.LimitReader(e.conn, agentproto.MaxSecretsBytes), 64<<10).ReadBytes('\n')
+	line, err := readLine(e.r, agentproto.MaxSecretsBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read secrets: %w", err)
 	}
@@ -493,7 +500,7 @@ func dialHost(port uint32) (*events, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &events{conn: conn, enc: json.NewEncoder(conn)}, nil
+	return &events{conn: conn, enc: json.NewEncoder(conn), r: bufio.NewReaderSize(conn, 64<<10)}, nil
 }
 
 // dialVsock connects to the host CID. It retries while the host listener

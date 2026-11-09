@@ -291,7 +291,10 @@ func TestLiveFirecracker(t *testing.T) {
 			rec := &recorder{}
 			inst, err := rt.Provision(ctx, machine.Launch{
 				ID: id, Slot: 6, Dir: dir, ImageID: "img-live", Spec: spec,
-				Args: []string{"/bin/sh", "-c", "echo kept > /out/f; sync; echo written; sleep 600"},
+				// No sync: the write may be only in the guest page cache.
+				// The process ignores SIGTERM, so the agent ends it with
+				// SIGKILL after the grace.
+				Args: []string{"/bin/sh", "-c", "trap '' TERM; echo kept > /out/f; echo written; sleep 600"},
 				Env:  []string{"PATH=/bin:/usr/bin"}, WorkDir: "/", Sink: rec,
 			})
 			if err != nil {
@@ -305,18 +308,24 @@ func TestLiveFirecracker(t *testing.T) {
 				return strings.Contains(rec.output(api.EventStdout), "written")
 			})
 			mark := logs.mark()
-			m.Kill("stopped")
+			m.Stop("stopped", time.Second)
 			res := waitKilled(t, m, 2*time.Minute)
-			if res.Exit != nil {
-				t.Errorf("exit = %+v, want none: the stop killed the process", res.Exit)
+			if res.Exit == nil || res.Exit.Code != 128+9 {
+				t.Errorf("exit = %+v, want code 137: the agent ends the process with SIGKILL after the grace", res.Exit)
 			}
 			logs.mu.Lock()
 			after := logs.buf.String()[mark:]
 			logs.mu.Unlock()
-			if !strings.Contains(after, `"msg":"drives exported"`) {
-				t.Errorf("log after the stop has no drives exported line")
+			if !strings.Contains(after, `"msg":"machine stop sent"`) || strings.Contains(after, `"code":"stop_forced"`) {
+				t.Errorf("log after the stop: want machine stop sent and no stop_forced")
 			}
-			check(t, res, dir)
+			if got := tarFile(t, filepath.Join(dir, "out", "out.tar"), "f"); got != "kept\n" {
+				t.Errorf("out drive file f = %q, want kept: the agent sends the drives after a graceful stop", got)
+			}
+			if export := res.Proof.Detail["drive_export"]; export != nil {
+				t.Errorf("proof drive_export = %v, want none: the agent sent the drives", export)
+			}
+			checkProof(t, rt, res)
 		})
 		t.Run("guest-failure", func(t *testing.T) {
 			// reboot -f ends the guest at once, as a kernel panic does: the
@@ -411,7 +420,7 @@ func TestLiveFirecracker(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			stopped, err := mgr.StopMachine(ctx, m.ID)
+			stopped, err := mgr.StopMachine(ctx, m.ID, api.StopRequest{})
 			if err != nil || stopped.State != api.StateExited || stopped.Proof == nil || !stopped.Proof.Destroyed {
 				t.Errorf("StopMachine() = state %s proof %+v, err %v; want exited with a destroyed proof", stopped.State, stopped.Proof, err)
 			}
@@ -427,6 +436,94 @@ func TestLiveFirecracker(t *testing.T) {
 
 		// A delete during start returns a destroyed proof. A guest that
 		// had not booted never boots, and nothing is left.
+		// A stop, a timeout, and an output limit about one second after a
+		// write keep the write. The agent ends the process gracefully and
+		// sends the drive tars, which read the guest page cache. vmcp killed
+		// the guest at once, and the export saw only what had reached the
+		// drive image, so a write of the last seconds was lost.
+		t.Run("graceful-after-write", func(t *testing.T) {
+			const write = "echo kept > /out/f; echo written; "
+			for _, gc := range []struct {
+				name       string
+				script     string
+				timeout    int64
+				limit      int64
+				stop       bool
+				wantReason api.ExitReason
+			}{
+				{"stop", write + "trap 'echo term; exit 0' TERM; sleep 600 & wait", 120, 0, true, api.ExitStopped},
+				{"timeout", write + "sleep 600", 4, 0, false, api.ExitTimeout},
+				{"output-limit", write + "sleep 1; yes | head -c 200000", 120, 4096, false, api.ExitOutputLimit},
+			} {
+				t.Run(gc.name, func(t *testing.T) {
+					s := spec("live-graceful-" + gc.name)
+					s.TimeoutSeconds, s.OutputLimitBytes = gc.timeout, gc.limit
+					s.Drives = []api.Drive{{Name: "out", GuestPath: "/out", SizeMiB: 16, Writable: true}}
+					s.Process = api.Process{Args: []string{"/bin/sh", "-c", gc.script}}
+					m, err := mgr.CreateMachine(ctx, s)
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _, _ = mgr.DeleteMachine(context.Background(), m.ID) })
+					if _, err := mgr.StartMachine(ctx, m.ID); err != nil {
+						t.Fatalf("StartMachine() error = %v", err)
+					}
+					var out strings.Builder
+					var once sync.Once
+					written := make(chan struct{})
+					followed := make(chan error, 1)
+					go func() {
+						followed <- mgr.Events(ctx, m.ID, 0, true, func(ev api.Event) error {
+							if ev.Kind == api.EventStdout {
+								out.Write(ev.Data)
+								if strings.Contains(out.String(), "written") {
+									once.Do(func() { close(written) })
+								}
+							}
+							return nil
+						})
+					}()
+					select {
+					case <-written:
+					case <-time.After(time.Minute):
+						t.Fatal("no drive write in one minute")
+					}
+					if gc.stop {
+						time.Sleep(time.Second)
+						if _, err := mgr.StopMachine(ctx, m.ID, api.StopRequest{TimeoutSeconds: 5}); err != nil {
+							t.Fatalf("StopMachine() error = %v", err)
+						}
+					}
+					select {
+					case err := <-followed:
+						if err != nil {
+							t.Fatalf("Events() error = %v", err)
+						}
+					case <-time.After(2 * time.Minute):
+						t.Fatal("the machine did not end in two minutes")
+					}
+					final, err := mgr.Machine(m.ID)
+					if err != nil || final.Exit == nil || final.Exit.Reason != gc.wantReason {
+						t.Fatalf("machine = exit %+v, %v; want reason %s", final.Exit, err, gc.wantReason)
+					}
+					if final.Proof == nil || final.Proof.Detail["drive_export"] != nil {
+						t.Errorf("proof = %+v, want the agent drive path and no export", final.Proof)
+					}
+					if gc.stop && !strings.Contains(out.String(), "term") {
+						t.Errorf("stdout = %q, want term: the process got no SIGTERM", out.String())
+					}
+					f, err := mgr.GetDrive(ctx, m.ID, "out")
+					if err != nil {
+						t.Fatalf("GetDrive() error = %v", err)
+					}
+					_ = f.Close()
+					if got := tarFile(t, f.Name(), "f"); got != "kept\n" {
+						t.Errorf("out drive file f = %q, want kept", got)
+					}
+				})
+			}
+		})
+
 		t.Run("delete-during-start", func(t *testing.T) {
 			for i, delay := range c.DeleteAfterStartMS {
 				// A stream of a machine that the manager lost never ends,

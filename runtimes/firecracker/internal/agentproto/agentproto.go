@@ -18,8 +18,8 @@ import (
 )
 
 // Version is the protocol version in Hello and Config. Version 3 adds
-// Config.Export.
-const Version = 3
+// Config.Export. Version 4 adds the TypeStop host message.
+const Version = 4
 
 // Guest paths and devices.
 const (
@@ -153,8 +153,12 @@ const (
 	TypeExit MessageType = "exit"
 	// TypeDone is the last message. Every drive tar was sent.
 	TypeDone MessageType = "done"
-	// TypeSecrets is the one host-to-guest message, sent after Hello.
+	// TypeSecrets is the first host-to-guest message, sent once after Hello.
 	TypeSecrets MessageType = "secrets"
+	// TypeStop is a host-to-guest message after TypeSecrets. The agent sends
+	// SIGTERM to the process group, and SIGKILL when the process still runs
+	// after GraceMS. It then sends the drive tars as after a process exit.
+	TypeStop MessageType = "stop"
 )
 
 // Message is one newline-delimited JSON message on EventPort.
@@ -166,6 +170,8 @@ type Message struct {
 	Data    []byte      `json:"data,omitempty"`
 	Code    int         `json:"code,omitempty"`
 	Detail  string      `json:"detail,omitempty"`
+	// GraceMS is set only on TypeStop.
+	GraceMS int64 `json:"grace_ms,omitempty"`
 	// Secrets is set only on TypeSecrets.
 	Secrets *Secrets `json:"secrets,omitempty"`
 }

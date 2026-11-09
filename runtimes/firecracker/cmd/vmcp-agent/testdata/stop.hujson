@@ -1,0 +1,37 @@
+// Graceful stop of the guest process by the agent. Each script runs in its
+// own session, as the agent starts the guest process. A script that sets a
+// trap prints "ready" after it, so that the test signals it only then.
+{
+  "cases": [
+    {
+      // The process handles SIGTERM and ends well before the grace.
+      "name": "sigterm handled",
+      // The child starts before "ready", so that the group signal reaches it.
+      "script": "trap 'exit 0' TERM; sleep 30 & echo ready; wait",
+      "grace_ms": 5000,
+      "wait_ready": true,
+      "want_code": 0,
+      "max_ms": 2000
+    },
+    {
+      // The process ignores SIGTERM. SIGKILL ends it after the grace.
+      "name": "sigterm ignored",
+      "script": "trap '' TERM; echo ready; sleep 30",
+      "grace_ms": 300,
+      "wait_ready": true,
+      "want_code": 137,
+      "min_ms": 250,
+      "max_ms": 3000
+    },
+    {
+      // A request that comes before the process starts applies when it
+      // starts.
+      "name": "request before start",
+      "script": "sleep 30",
+      "grace_ms": 5000,
+      "request_first": true,
+      "want_code": -1,
+      "max_ms": 2000
+    }
+  ]
+}

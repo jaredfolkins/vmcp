@@ -41,6 +41,8 @@ type fakeRuntime struct {
 	release      chan struct{}
 	// boots counts the guests that booted.
 	boots atomic.Int32
+	// stops records each graceful stop: the reason and the grace.
+	stops []fakeStop
 }
 
 func (f *fakeRuntime) ImageCompatibility() string {
@@ -164,6 +166,27 @@ func (i *fakeInstance) finish(exit *api.Exit) {
 		i.result = machine.Result{Exit: exit, Proof: api.Proof{MachineID: i.l.ID, Runtime: "fake", Destroyed: true, TeardownStatus: "destroyed"}}
 		close(i.done)
 	})
+}
+
+// fakeStop is one call of fakeInstance.Stop.
+type fakeStop struct {
+	reason string
+	grace  time.Duration
+}
+
+// Stop records the stop and then ends the program as Kill does.
+func (i *fakeInstance) Stop(reason string, grace time.Duration) {
+	i.rt.mu.Lock()
+	i.rt.stops = append(i.rt.stops, fakeStop{reason: reason, grace: grace})
+	i.rt.mu.Unlock()
+	i.Kill(reason)
+}
+
+// stopCalls returns the recorded graceful stops.
+func (f *fakeRuntime) stopCalls() []fakeStop {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeStop(nil), f.stops...)
 }
 
 func (i *fakeInstance) Kill(reason string) {

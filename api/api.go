@@ -217,9 +217,11 @@ type Endpoint struct {
 }
 
 // StopRequest is the body of RouteStopMachine and RouteRestartMachine.
-// vmcp asks the guest to shut down, then forces it after the timeout. A
-// stop of a created machine ends it at once with a proof, and a later
-// RouteStartMachine fails with ErrConflict.
+// vmcp asks the guest to end its process: SIGTERM to the process group, then
+// SIGKILL when it still runs after TimeoutSeconds. The guest then sends its
+// writable drives as after a process exit. TimeoutSeconds is 1 to 300; 0 or
+// an empty body means 10. A stop of a created machine ends it at once with a
+// proof, and a later RouteStartMachine fails with ErrConflict.
 type StopRequest struct {
 	TimeoutSeconds int64 `json:"timeout_seconds,omitempty"`
 }

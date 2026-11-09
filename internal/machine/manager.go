@@ -689,7 +689,7 @@ func (m *Manager) StartMachine(ctx context.Context, id string) (api.Machine, err
 	_ = en.events.append(api.Event{Kind: api.EventState, State: api.StateRunning})
 	timeout := time.Duration(en.rec.Spec.TimeoutSeconds) * time.Second
 	m.mu.Lock()
-	en.timer = time.AfterFunc(timeout, func() { m.kill(en, "timeout") })
+	en.timer = time.AfterFunc(timeout, func() { m.stop(en, "timeout", DefaultStopGrace) })
 	m.mu.Unlock()
 	go func() {
 		<-inst.Done()
@@ -786,16 +786,60 @@ func mergeEnv(base, over []string) []string {
 }
 
 // StopMachine stops a running machine.
-func (m *Manager) StopMachine(ctx context.Context, id string) (api.Machine, error) {
+func (m *Manager) StopMachine(ctx context.Context, id string, req api.StopRequest) (api.Machine, error) {
+	grace, err := stopGrace(req)
+	if err != nil {
+		return api.Machine{}, err
+	}
 	m.mu.Lock()
 	en := m.machines[id]
 	m.mu.Unlock()
 	if en == nil {
 		return api.Machine{}, errorf(api.ErrNotFound, "machine not found")
 	}
-	m.log.InfoContext(ctx, "machine stop requested", "machine", id)
-	m.kill(en, "stopped")
+	m.log.InfoContext(ctx, "machine stop requested", "machine", id, "grace_ms", trace.Millis(grace))
+	m.stop(en, "stopped", grace)
 	return m.Machine(id)
+}
+
+// DefaultStopGrace is the grace of a stop request without a timeout, and of
+// a timeout or output-limit stop. MaxStopGrace bounds a requested grace.
+const (
+	DefaultStopGrace = 10 * time.Second
+	MaxStopGrace     = 300 * time.Second
+)
+
+// stopGrace returns the grace of a stop request.
+func stopGrace(req api.StopRequest) (time.Duration, error) {
+	switch {
+	case req.TimeoutSeconds == 0:
+		return DefaultStopGrace, nil
+	case req.TimeoutSeconds < 0 || time.Duration(req.TimeoutSeconds)*time.Second > MaxStopGrace:
+		return 0, errorf(api.ErrInvalidRequest, "timeout_seconds must be 1 to %d", int64(MaxStopGrace/time.Second))
+	}
+	return time.Duration(req.TimeoutSeconds) * time.Second, nil
+}
+
+// stop records the first stop reason of a created or running machine and
+// ends it gracefully. A created machine ends at once, as with kill. Only the
+// first stop or kill reason asks the instance to stop; an output limit
+// calls stop once for each chunk past the limit.
+func (m *Manager) stop(en *entry, reason string, grace time.Duration) {
+	m.mu.Lock()
+	inst, state := en.inst, en.rec.Machine.State
+	if state == api.StateCreated || inst == nil {
+		m.mu.Unlock()
+		m.kill(en, reason)
+		return
+	}
+	first := en.killReason == "" && state == api.StateRunning
+	if first {
+		en.killReason = reason
+	}
+	m.mu.Unlock()
+	if first {
+		inst.Stop(reason, grace)
+	}
 }
 
 // kill records the first kill reason of a created or running machine and
@@ -1080,7 +1124,7 @@ func (s *sink) emitOutput(ev api.Event) {
 			s.limitHit = true
 			s.en.log.WarnContext(s.en.traceCtx, "machine output limit reached", "code", "output_limit", "limit_bytes", s.limit)
 		}
-		s.m.kill(s.en, "output-limit")
+		s.m.stop(s.en, "output-limit", DefaultStopGrace)
 		return
 	}
 	_ = s.en.events.append(ev)

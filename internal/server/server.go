@@ -32,7 +32,7 @@ type Service interface {
 	Machine(id string) (api.Machine, error)
 	Machines(labels map[string]string) []api.Machine
 	StartMachine(ctx context.Context, id string) (api.Machine, error)
-	StopMachine(ctx context.Context, id string) (api.Machine, error)
+	StopMachine(ctx context.Context, id string, req api.StopRequest) (api.Machine, error)
 	DeleteMachine(ctx context.Context, id string) (api.Machine, error)
 	PutDrive(ctx context.Context, id, name string, r io.Reader) error
 	GetDrive(ctx context.Context, id, name string) (*os.File, error)
@@ -91,7 +91,12 @@ func New(cfg Config) http.Handler {
 			s.reply(w, http.StatusOK)(s.svc.StartMachine(r.Context(), r.PathValue("id")))
 		},
 		api.RouteStopMachine: func(w http.ResponseWriter, r *http.Request) {
-			s.reply(w, http.StatusOK)(s.svc.StopMachine(r.Context(), r.PathValue("id")))
+			// The body is optional; an empty body takes the default grace.
+			var req api.StopRequest
+			if r.ContentLength != 0 && !s.decode(w, r, &req) {
+				return
+			}
+			s.reply(w, http.StatusOK)(s.svc.StopMachine(r.Context(), r.PathValue("id"), req))
 		},
 		api.RouteDeleteMachine: func(w http.ResponseWriter, r *http.Request) {
 			s.reply(w, http.StatusOK)(s.svc.DeleteMachine(r.Context(), r.PathValue("id")))

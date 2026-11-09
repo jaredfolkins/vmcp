@@ -36,11 +36,16 @@ import (
 const guestBootArgs = "console=ttyS0 reboot=k panic=1 pci=off init=" + agentproto.InitPath
 
 const (
-	serialLogLimit  = 1 << 20
-	memoryOverhead  = 128
-	defaultDiskMiB  = 1024
-	killWait        = 5 * time.Second
-	driveSlackBytes = 16 << 20
+	// stopWriteTimeout bounds the write of a stop request.
+	stopWriteTimeout = 5 * time.Second
+	// stopDriveBaseTime is the time for the agent to start the drive
+	// transfer after the process ended.
+	stopDriveBaseTime = 15 * time.Second
+	serialLogLimit    = 1 << 20
+	memoryOverhead    = 128
+	defaultDiskMiB    = 1024
+	killWait          = 5 * time.Second
+	driveSlackBytes   = 16 << 20
 )
 
 var upstreamNameRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,31}$`)
@@ -70,15 +75,21 @@ type Machine struct {
 	secrets *agentproto.Secrets
 	// export marks the drive export guest of another machine (export.go).
 	export bool
+	// connMu orders the host writes on the event connection: the one
+	// Secrets message and a later stop request.
+	connMu sync.Mutex
 
 	mu         sync.Mutex
 	booted     bool
 	finished   bool
 	killReason string
-	exit       *api.Exit
-	posture    map[string]any
-	done       chan struct{}
-	result     machine.Result
+	// eventConn is the agent event connection, set after Secrets were
+	// sent. A stop request goes on it.
+	eventConn net.Conn
+	exit      *api.Exit
+	posture   map[string]any
+	done      chan struct{}
+	result    machine.Result
 }
 
 // Provision builds the jail, drives, network, and brokers of a machine. It
@@ -444,6 +455,81 @@ func (m *Machine) Kill(reason string) {
 	_ = killCgroup(m.cgroup)
 }
 
+// Stop ends the guest process gracefully. The guest agent sends SIGTERM to
+// the process group and SIGKILL when it still runs after grace. The agent
+// then sends the writable drives and ends the guest as after a process exit,
+// so the drives include writes that the guest kernel still held in memory.
+// Stop kills the guest at once when the agent is not connected or the
+// request cannot be sent, and when the guest has not ended after grace and
+// the drive transfer time. The first stop or kill reason stays.
+func (m *Machine) Stop(reason string, grace time.Duration) {
+	m.mu.Lock()
+	first := m.killReason == ""
+	if first {
+		m.killReason = reason
+	}
+	conn, logCtx := m.eventConn, m.traceCtx
+	m.mu.Unlock()
+	if !first {
+		return
+	}
+	cause := ""
+	switch {
+	case conn == nil:
+		cause = "agent_not_connected"
+	case m.sendStop(conn, grace) != nil:
+		cause = "stop_not_sent"
+	}
+	if cause != "" {
+		m.forceStop(logCtx, reason, cause, grace)
+		return
+	}
+	m.log.DebugContext(logCtx, "machine stop sent", "reason", reason, "grace_ms", trace.Millis(grace))
+	time.AfterFunc(grace+stopDriveTime(m.spec.Spec.Drives), func() {
+		select {
+		case <-m.done:
+		default:
+			m.forceStop(logCtx, reason, "grace_expired", grace)
+		}
+	})
+}
+
+// sendStop writes the stop request on the agent event connection.
+func (m *Machine) sendStop(conn net.Conn, grace time.Duration) error {
+	raw, err := json.Marshal(agentproto.Message{Type: agentproto.TypeStop, GraceMS: grace.Milliseconds()})
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	m.connMu.Lock()
+	defer m.connMu.Unlock()
+	if err := conn.SetWriteDeadline(time.Now().Add(stopWriteTimeout)); err != nil {
+		return err
+	}
+	_, err = conn.Write(raw)
+	return err
+}
+
+// forceStop kills a guest whose graceful stop did not happen. The drive
+// export then keeps what reached the drive images.
+func (m *Machine) forceStop(logCtx context.Context, reason, cause string, grace time.Duration) {
+	m.log.WarnContext(logCtx, "machine stop forced", "code", "stop_forced", "reason", reason, "cause", cause,
+		"grace_ms", trace.Millis(grace))
+	m.Kill(reason)
+}
+
+// stopDriveTime bounds the transfer of the writable drives after a stop, at
+// exportMiBPerSecond, with stopDriveBaseTime for the agent to start it.
+func stopDriveTime(drives []api.Drive) time.Duration {
+	var mib int
+	for _, d := range drives {
+		if d.Writable {
+			mib += d.SizeMiB
+		}
+	}
+	return stopDriveBaseTime + time.Duration(mib/exportMiBPerSecond)*time.Second
+}
+
 // Done is closed after the machine ended and every resource was removed.
 func (m *Machine) Done() <-chan struct{} { return m.done }
 
@@ -634,6 +720,9 @@ func (m *Machine) readEvents(c net.Conn) {
 				return
 			}
 			m.sendSecrets(c)
+			m.mu.Lock()
+			m.eventConn = c
+			m.mu.Unlock()
 			m.log.InfoContext(logCtx, "guest agent connected", "boot_ms", trace.Millis(time.Since(bootStart)))
 			m.event(api.Event{Kind: api.EventStep, Step: "guest-agent", Status: "running"})
 			m.checkPosture()
@@ -681,7 +770,9 @@ func (m *Machine) sendSecrets(c net.Conn) {
 	raw, err := json.Marshal(agentproto.Message{Type: agentproto.TypeSecrets, Secrets: secrets})
 	if err == nil {
 		raw = append(raw, '\n')
+		m.connMu.Lock()
 		_, err = c.Write(raw)
+		m.connMu.Unlock()
 	}
 	clear(raw)
 	if err != nil {

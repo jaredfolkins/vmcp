@@ -1,0 +1,16 @@
+// Graceful stops: which ends of a machine stop it with SIGTERM and a grace,
+// and with which grace.
+{
+  "deadline_ms": 8000,
+  // A stop request with a timeout uses it as the grace.
+  "requested_timeout_seconds": 7,
+  // A stop request without a timeout, a machine timeout, and an output
+  // limit use the default grace.
+  "default_grace_ms": 10000,
+  // A grace above the limit is refused, and the machine keeps running.
+  "too_long_timeout_seconds": 301,
+  "want_invalid_code": "invalid_request",
+  // A machine that times out, and one that writes past its output limit.
+  "machine_timeout_seconds": 1,
+  "output_limit_bytes": 4096
+}
