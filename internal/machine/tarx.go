@@ -49,6 +49,13 @@ func extractTar(r io.Reader, dir string, maxBytes int64) error {
 		mode := os.FileMode(hdr.Mode & 0o777)
 		switch hdr.Typeflag {
 		case tar.TypeDir:
+			// An earlier entry can be a symlink of this name. MkdirAll and
+			// Chmod would follow it out of the drive.
+			if fi, err := os.Lstat(target); err == nil && !fi.IsDir() {
+				if err := os.Remove(target); err != nil {
+					return err
+				}
+			}
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
 			}

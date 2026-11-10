@@ -250,6 +250,8 @@ func (f *fakeHost) nftTables() ([]hostTable, error) { return slices.Clone(f.tabl
 
 func (f *fakeHost) hostProcesses() error { return f.procErr }
 
+func (f *fakeHost) capabilities() error { return nil }
+
 func (f *fakeHost) cgroupWatchers(paths []string) ([]cgroupWatcher, error) {
 	if f.procErr != nil {
 		return nil, f.procErr
@@ -796,5 +798,65 @@ func TestParseNftTables(t *testing.T) {
 	}
 	if got := parseNftTables([]byte(in.NftRuleset.Ruleset)); !slices.Equal(got, in.NftRuleset.Want) {
 		t.Errorf("parseNftTables() = %+v, want %+v", got, in.NftRuleset.Want)
+	}
+}
+
+// TestHostEnsureConverges proves that ensure installs a clean host, changes
+// nothing on a second run, repairs what a host boot or an edit removed, and
+// does so while the service runs.
+func TestHostEnsureConverges(t *testing.T) {
+	in := readHostInput(t)
+	f, cfg := newFakeHost(t, in.InstallID, hostCase{}, nil)
+	ctx := context.Background()
+	first := RunHostCommand(ctx, "ensure", cfg)
+	if !first.OK || !first.Installed || len(first.Written) == 0 {
+		t.Fatalf("ensure: ok %t installed %t written %d error %q", first.OK, first.Installed, len(first.Written), first.Error)
+	}
+	checkInstalled(t, f, cfg)
+	checkTmpfiles(t, cfg, in.WantTmpfiles)
+
+	second := RunHostCommand(ctx, "ensure", cfg)
+	if !second.OK || !second.Installed || len(second.Written) != 0 || len(second.Removed) != 0 {
+		t.Fatalf("second ensure: ok %t installed %t written %q removed %q error %q", second.OK, second.Installed,
+			keys(cfg, second.Written), keys(cfg, second.Removed), second.Error)
+	}
+
+	// A host boot empties the cgroup file system and unloads nothing else;
+	// an edit changes a file; a vmcp service runs meanwhile.
+	parent := filepath.Join(cfg.CgroupRoot, "vmcp-"+in.InstallID)
+	if err := os.RemoveAll(parent); err != nil {
+		t.Fatal(err)
+	}
+	delete(f.tags, parent)
+	seccomp := filepath.Join(cfg.HostRoot, "etc", "vmcp", in.InstallID, seccompName)
+	if err := os.WriteFile(seccomp, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	delete(f.profiles, "vmcp-"+in.InstallID)
+	f.watchers = []cgroupWatcher{{PID: 7, Comm: "vmcp", Cgroup: parent}}
+	third := RunHostCommand(ctx, "ensure", cfg)
+	if !third.OK || !third.Installed {
+		t.Fatalf("repair: ok %t installed %t error %q", third.OK, third.Installed, third.Error)
+	}
+	// The fake clock does not move, so the receipt keeps its bytes.
+	want := []string{"apparmor-profile vmcp-" + in.InstallID, "cgroup vmcp-" + in.InstallID,
+		"config-file /etc/vmcp/" + in.InstallID + "/seccomp.json"}
+	if got := sorted(keys(cfg, third.Written)); !slices.Equal(got, want) {
+		t.Errorf("repair wrote %q, want %q", got, want)
+	}
+	checkInstalled(t, f, cfg)
+}
+
+// TestHostEnsureRefusesForeignNames proves that ensure does not take a
+// name that an untagged resource holds, and changes nothing then.
+func TestHostEnsureRefusesForeignNames(t *testing.T) {
+	in := readHostInput(t)
+	f, cfg := newFakeHost(t, in.InstallID, in.BlockedInstall, nil)
+	res := RunHostCommand(context.Background(), "ensure", cfg)
+	if res.OK || len(res.Written) != 0 || len(res.Conflicts) == 0 {
+		t.Fatalf("ensure on a blocked host: ok %t written %q conflicts %d", res.OK, keys(cfg, res.Written), len(res.Conflicts))
+	}
+	if len(f.modules) != 0 {
+		t.Errorf("ensure loaded modules %q on a blocked host", f.modules)
 	}
 }

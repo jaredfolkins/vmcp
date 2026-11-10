@@ -1,0 +1,84 @@
+# vmcp with Docker Compose. One command installs the host resources and
+# starts the service:
+#
+#   docker compose up -d
+#
+# The host needs Linux amd64 with /dev/kvm, cgroup v2, AppArmor, and Docker.
+#
+# vmcp-host runs once before each start of vmcp. It runs
+# `vmcp host ensure`, which writes only what is missing or differs: the
+# AppArmor profile vmcp-<id>, the parent cgroup vmcp-<id>, the kernel
+# modules, and the host files that bring them back at a host boot. It also
+# creates the caller credential in the volume vmcp-credential when none
+# exists. It is root with host access; vmcp is not.
+#
+# Compose reads the seccomp profile when it creates the vmcp container, so
+# the file must exist before `up`. Keep it next to this file.
+name: vmcp
+
+services:
+  vmcp-host:
+    image: ${VMCP_IMAGE:-vmcp:dev}
+    build: .
+    user: "0:0"
+    command:
+      - host
+      - ensure
+      - --install-id
+      - ${VMCP_INSTALL_ID:-main}
+      - --credential-file
+      - /credential/vmcp-credential
+    restart: "no"
+    healthcheck:
+      disable: true
+    network_mode: host
+    pid: host
+    cgroup: host
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, FSETID, MAC_ADMIN, NET_ADMIN,
+              NET_BIND_SERVICE, SYS_ADMIN, SYS_MODULE, SYS_PTRACE]
+    security_opt:
+      - apparmor=unconfined
+    volumes:
+      - /etc:/host/etc
+      - /lib/modules:/lib/modules:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup
+      - /sys/kernel/security:/sys/kernel/security
+      - vmcp-credential:/credential
+
+  vmcp:
+    image: ${VMCP_IMAGE:-vmcp:dev}
+    build: .
+    user: "65532:65532"
+    command:
+      - serve
+      - --install-id
+      - ${VMCP_INSTALL_ID:-main}
+      - --pool
+      - ${VMCP_POOL:-100.80.0.0/16}
+    restart: unless-stopped
+    depends_on:
+      vmcp-host:
+        condition: service_completed_successfully
+    cgroup: host
+    devices:
+      - /dev/kvm:/dev/kvm:rwm
+      - /dev/net/tun:/dev/net/tun:rwm
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, FSETID, MKNOD, NET_ADMIN,
+              NET_BIND_SERVICE, SETGID, SETUID, SYS_ADMIN]
+    security_opt:
+      - apparmor=vmcp-${VMCP_INSTALL_ID:-main}
+      - seccomp=./runtimes/firecracker/deploy/seccomp.json
+    volumes:
+      - vmcp-state:/var/lib/vmcp
+      - /sys/fs/cgroup:/sys/fs/cgroup
+      - vmcp-credential:/run/secrets:ro
+    # Loopback only. A deployment publishes no port and puts the caller on
+    # a private network with vmcp instead.
+    ports:
+      - 127.0.0.1:${VMCP_PORT:-18080}:8080
+
+volumes:
+  vmcp-state: {}
+  vmcp-credential: {}

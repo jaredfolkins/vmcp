@@ -395,18 +395,34 @@ func (m *Manager) CreateMachine(ctx context.Context, spec api.MachineSpec) (api.
 		},
 		finished: make(chan struct{}),
 		settled:  make(chan struct{}),
+		// Set before the entry is visible: a request for the new ID reads it.
+		events: newEventLog(filepath.Join(m.machineDir(id), "events.ndjson")),
 	}
 	m.slots[slot] = id
 	m.machines[id] = en
 	m.names[spec.Name] = id
 	m.mu.Unlock()
-	if err := os.MkdirAll(m.machineDir(id), 0o700); err != nil {
+	// A create that cannot store its record gives back its slot and name.
+	forget := func(err error) (api.Machine, error) {
+		m.mu.Lock()
+		if m.machines[id] == en {
+			delete(m.machines, id)
+			delete(m.names, spec.Name)
+			if m.slots[slot] == id {
+				delete(m.slots, slot)
+			}
+		}
+		m.mu.Unlock()
+		_ = m.secrets.take(id)
+		_ = os.RemoveAll(m.machineDir(id))
 		return api.Machine{}, err
 	}
-	en.events = newEventLog(filepath.Join(m.machineDir(id), "events.ndjson"))
+	if err := os.MkdirAll(m.machineDir(id), 0o700); err != nil {
+		return forget(err)
+	}
 	m.secrets.put(id, spec)
 	if err := m.save(en); err != nil {
-		return api.Machine{}, err
+		return forget(err)
 	}
 	_ = en.events.append(api.Event{Kind: api.EventState, State: api.StateCreated})
 	en.log.InfoContext(ctx, "machine created", "image", spec.Image, "lifecycle", spec.Lifecycle, "slot", slot,

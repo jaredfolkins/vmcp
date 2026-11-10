@@ -4,7 +4,7 @@
 //
 //	vmcp serve [flags]
 //	vmcp healthcheck [--url URL]
-//	vmcp host check|install|teardown|status --install-id ID [flags]
+//	vmcp host check|ensure|install|teardown|status --install-id ID [flags]
 package main
 
 import (

@@ -192,6 +192,7 @@
   // owner; the glob line that gives it to the service user runs last.
   "want_tmpfiles": [
     "# vmcp-owner: live-gate",
+    "w @CGROUP_ROOT@/cgroup.subtree_control - - - - +cpu +memory +pids",
     "d @CGROUP_ROOT@/vmcp-live-gate 0755 root root - -",
     "t @CGROUP_ROOT@/vmcp-live-gate - - - - trusted.vmcp.owner=live-gate",
     "w @CGROUP_ROOT@/vmcp-live-gate/cgroup.subtree_control - - - - +cpu +memory +pids",

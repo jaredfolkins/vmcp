@@ -43,7 +43,7 @@
 - vmcp runs as UID and GID `65532` with file capabilities, the AppArmor
   profile `vmcp-<install-id>` in enforce mode, and the vmcp seccomp
   profile. See [Capabilities](#capabilities).
-- `vmcp host check|install|teardown|status` install, verify, report, and
+- `vmcp host check|ensure|install|teardown|status` install, verify, report, and
   remove the host resources of one install by their ownership tags. See
   [Commands](#commands). The full V4 install transaction is not done.
 - Live evidence on 2026-10-08, commit `5b4b833`, on an Ubuntu 24.04 amd64
@@ -99,6 +99,23 @@
   - A real host reboot is NOT VERIFIED. At a real boot, the root
     `cgroup.subtree_control` must enable `cpu`, `memory`, and `pids` when
     systemd-tmpfiles-setup runs; that is NOT VERIFIED.
+- Live evidence of `vmcp host ensure` through `compose.yaml` on
+  2026-11-10, on the same host (kernel 7.0), with install ID
+  `compose-test`:
+  - One `docker compose up -d` on a host without the install wrote all 8
+    resources and the credential, and vmcp answered `/ready` with 204. The
+    self-test passed.
+  - A second `up` recreated nothing, and a second `ensure` wrote 0
+    resources.
+  - With vmcp running, a changed `seccomp.json` was restored (2 writes with
+    the receipt), and vmcp stayed ready.
+  - After the parent cgroup was removed, `systemd-tmpfiles --create` with
+    the new root `w` line made it again and `docker start` alone gave a
+    ready vmcp. Without the tmpfiles step vmcp stopped with "parent cgroup
+    ... is missing", and `docker compose up -d` repaired it.
+  - The kernel log had zero `apparmor="DENIED"` lines for the profile.
+    `vmcp host teardown` removed all 8 resources.
+  - A real host reboot is still NOT VERIFIED.
 - Live evidence of the service lock, the host nftables scan, and the
   mount-table posture check on 2026-10-08, commit `10d693d`, on the same
   host, with steps 1 to 6 of
@@ -565,6 +582,13 @@ upgrade, a downgrade, a rollback, and a configuration change all use it.
 There is no in-place update. Do not skip teardown when the version is
 unchanged.
 
+One exception (owner decision, 2026-11-10): `vmcp host ensure` brings the
+host resources of an install to the state of the running version in place,
+so that `docker compose up` installs a host on its first start with no
+other step. It covers only the host resources of
+[Commands](#commands), never machines or the state root, and it removes
+nothing. `vmcp host install` stays the teardown-first reset.
+
 1. **Preflight.** Verify the OS folder matches the host, the host
    prerequisites, the exact input digests, the configuration, and that the
    target release can restore every kept snapshot. Make no change.
@@ -633,6 +657,7 @@ bring its resources back before Docker starts the vmcp service:
 
   ```text
   # vmcp-owner: <id>
+  w /sys/fs/cgroup/cgroup.subtree_control - - - - +cpu +memory +pids
   d /sys/fs/cgroup/vmcp-<id> 0755 root root - -
   t /sys/fs/cgroup/vmcp-<id> - - - - trusted.vmcp.owner=<id>
   w /sys/fs/cgroup/vmcp-<id>/cgroup.subtree_control - - - - +cpu +memory +pids
@@ -650,8 +675,9 @@ service user. It is a glob that matches only the directory, because
 systemd-tmpfiles applies glob lines after all other lines. With the
 service user on the `d` line, the `z` lines of the files fail.
 
-The `w` line needs `cpu`, `memory`, and `pids` in the root
-`cgroup.subtree_control`, as `vmcp host check` does. The service UID and
+The first `w` line makes the cgroup root pass `cpu`, `memory`, and `pids`
+on to its children, because a host can run systemd-tmpfiles-setup before
+any unit needs them. Its path sorts before the parent cgroup. The service UID and
 GID come from `--service-uid` and `--service-gid`. The live gate
 simulated the boot of the parent cgroup only; a real host reboot is NOT
 VERIFIED (see [Current State](#current-state)).
@@ -666,15 +692,33 @@ VERIFIED (see [Current State](#current-state)).
   the first failed check, and the cleanup result.
 
 ### Commands
-- `vmcp host check|install|teardown|status --install-id <id>` manage the
+- `vmcp host check|ensure|install|teardown|status --install-id <id>` manage the
   host resources of one install. Each prints one JSON result on stdout and
   exits with status 1 when `ok` is false. The command line is decoded
   strictly. An unknown command, flag, or argument fails before any host
   access.
-  - `check` verifies root, the host `/etc` mount, cgroup v2 with `cpu`,
-    `memory`, and `pids` on at the root, AppArmor, the host processes
+  - `check` verifies root, the host `/etc` mount, cgroup v2 with the `cpu`,
+    `memory`, and `pids` controllers, AppArmor, the host processes
     (`--pid=host` and SYS_PTRACE), and CPU virtualization. It makes no
     change.
+  - `ensure` is the command of the Compose service `vmcp-host`, which
+    runs before each start of the vmcp service (see `compose.yaml`). It
+    runs `check`, refuses a name that an untagged or foreign resource
+    holds, and then gives each resource of `install` the state that this
+    version writes. It writes a file only when its bytes differ, in one
+    rename. It loads the profile only when its file changed or the profile
+    is not loaded in enforce mode. It creates and delegates the parent
+    cgroup only when it is missing or not delegated. It removes nothing
+    and does not need the service to stop, so a second run changes
+    nothing. `--credential-file` creates the caller credential (32 random
+    bytes as hex, mode `0400`, owner the service user) when the file does
+    not exist; it never changes an existing file. Use `install` for a
+    reset, and `teardown` to remove an install.
+  - `install` and `ensure` also check that the command holds MAC_ADMIN,
+    SYS_ADMIN, SYS_MODULE, CHOWN, and DAC_OVERRIDE before they change
+    anything, and they enable `cpu`, `memory`, and `pids` for the children
+    of the cgroup root. A cgroup or configuration directory that cannot
+    get its tag is removed again, so a failed run leaves nothing untagged.
   - `install` runs `check`, then `teardown`, then writes
     `/etc/vmcp/<id>/seccomp.json`, writes `/etc/apparmor.d/vmcp-<id>` and
     loads it with `apparmor_parser -r -W` in enforce mode, creates the

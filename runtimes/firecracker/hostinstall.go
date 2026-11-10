@@ -180,6 +180,8 @@ func RunHostCommand(ctx context.Context, command string, cfg HostConfig) HostRes
 			err = h.check(ctx)
 		case "install":
 			err = h.install(ctx)
+		case "ensure":
+			err = h.ensure(ctx)
 		case "teardown":
 			err = h.teardown(ctx)
 		case "status":
@@ -189,7 +191,7 @@ func RunHostCommand(ctx context.Context, command string, cfg HostConfig) HostRes
 		}
 	}
 	res.OK = err == nil
-	if err != nil && command == "install" {
+	if err != nil && (command == "install" || command == "ensure") {
 		// A failed install leaves only tagged resources. Report them; the
 		// next install or teardown removes them.
 		if inv, ierr := h.inventory(ctx); ierr == nil {
@@ -258,20 +260,24 @@ func (h *hostRun) check(ctx context.Context) error {
 		return nil
 	}())
 	add("cgroup2", func() error {
-		for _, f := range []string{"cgroup.controllers", "cgroup.subtree_control"} {
-			b, err := os.ReadFile(filepath.Join(h.cfg.CgroupRoot, f))
-			if err != nil {
-				return fmt.Errorf("cgroup v2 root is not mounted at %s", h.cfg.CgroupRoot)
-			}
-			have := strings.Fields(string(b))
-			for _, c := range cgroupControllers {
-				if !slices.Contains(have, c) {
-					return fmt.Errorf("the cgroup root %s does not enable the %s controller", f, c)
-				}
+		// Install enables the controllers for the children of the root
+		// itself, so only their presence is a prerequisite.
+		b, err := os.ReadFile(filepath.Join(h.cfg.CgroupRoot, "cgroup.controllers"))
+		if err != nil {
+			return fmt.Errorf("cgroup v2 root is not mounted at %s", h.cfg.CgroupRoot)
+		}
+		have := strings.Fields(string(b))
+		for _, c := range cgroupControllers {
+			if !slices.Contains(have, c) {
+				return fmt.Errorf("the cgroup root does not have the %s controller", c)
 			}
 		}
 		return nil
 	}())
+	if h.res.Command == "install" || h.res.Command == "ensure" {
+		// A command that writes needs these before it changes anything.
+		add("capabilities", h.sys.capabilities())
+	}
 	add("apparmor", func() error {
 		_, err := h.sys.loadedProfiles()
 		return err
@@ -484,6 +490,9 @@ func (h *hostRun) writeConfig(ctx context.Context) error {
 	h.written(ctx, kindConfigDir, h.hostPath(dir))
 	marker := h.ownerHeader() + seccompName + "\n" + receiptName + "\n"
 	if err := writeFileExcl(filepath.Join(dir, ownerMarker), []byte(marker)); err != nil {
+		// Without its marker the directory would block every later
+		// install, and teardown would not remove it.
+		_ = os.Remove(dir)
 		return err
 	}
 	if err := writeFileExcl(filepath.Join(dir, seccompName), seccompProfile); err != nil {
@@ -521,9 +530,21 @@ func (h *hostRun) writeCgroup(ctx context.Context) error {
 		return fmt.Errorf("create parent cgroup: %w", err)
 	}
 	if err := h.sys.tagCgroup(p, h.cfg.InstallID); err != nil {
+		// Without its tag the cgroup would block every later install,
+		// and teardown would not remove it.
+		_ = h.sys.removeCgroup(p)
 		return err
 	}
 	h.written(ctx, kindCgroup, p)
+	return h.delegateCgroup(p)
+}
+
+// delegateCgroup enables the controllers of the parent cgroup and gives it
+// to the service user. The root must pass the controllers on first.
+func (h *hostRun) delegateCgroup(p string) error {
+	if err := h.sys.enableControllers(h.cfg.CgroupRoot, cgroupControllers); err != nil {
+		return fmt.Errorf("enable controllers of the cgroup root: %w", err)
+	}
 	if err := h.sys.enableControllers(p, cgroupControllers); err != nil {
 		return fmt.Errorf("enable controllers: %w", err)
 	}
@@ -577,6 +598,9 @@ func (h *hostRun) tmpfilesBody() (string, error) {
 	owner := fmt.Sprintf("%d %d", h.cfg.ServiceUID, h.cfg.ServiceGID)
 	var b strings.Builder
 	b.WriteString(h.ownerHeader())
+	// At boot the root may not pass the controllers on yet. Its path
+	// sorts before the parent cgroup, so systemd-tmpfiles writes it first.
+	fmt.Fprintf(&b, "w %s - - - - %s\n", filepath.Join(h.cfg.CgroupRoot, "cgroup.subtree_control"), enableControllersArg(cgroupControllers))
 	fmt.Fprintf(&b, "d %s 0755 root root - -\n", p)
 	fmt.Fprintf(&b, "t %s - - - - %s=%s\n", p, ownerXattr, h.cfg.InstallID)
 	fmt.Fprintf(&b, "w %s - - - - %s\n", filepath.Join(p, "cgroup.subtree_control"), enableControllersArg(cgroupControllers))
@@ -593,11 +617,10 @@ func (h *hostRun) tmpfilesBody() (string, error) {
 // writeModules loads the KVM, TUN, and nftables TPROXY modules and keeps
 // them across a host boot. The gateway chain needs TPROXY.
 func (h *hostRun) writeModules(ctx context.Context) error {
-	kvm, err := h.kvmModule()
+	mods, err := h.modules()
 	if err != nil {
 		return err
 	}
-	mods := []string{"kvm", kvm, "tun", "nft_tproxy"}
 	for _, m := range mods {
 		if err := h.sys.loadModule(m); err != nil {
 			return err
@@ -614,14 +637,32 @@ func (h *hostRun) writeModules(ctx context.Context) error {
 	return nil
 }
 
-func (h *hostRun) writeReceipt(ctx context.Context) error {
+// modules are the kernel modules of an install: KVM for the host CPU, TUN,
+// and nftables TPROXY.
+func (h *hostRun) modules() ([]string, error) {
+	kvm, err := h.kvmModule()
+	if err != nil {
+		return nil, err
+	}
+	return []string{"kvm", kvm, "tun", "nft_tproxy"}, nil
+}
+
+// receipt is the receipt of an install by this build.
+func (h *hostRun) receipt() (HostReceipt, error) {
 	rel, err := BakedRelease()
+	if err != nil {
+		return HostReceipt{}, err
+	}
+	return HostReceipt{Schema: receiptSchema, InstallID: h.cfg.InstallID, Version: h.cfg.Version, Commit: h.cfg.Commit,
+		Release: rel.Version, ServiceUID: h.cfg.ServiceUID, ServiceGID: h.cfg.ServiceGID,
+		InstalledAt: h.cfg.Now().UTC().Truncate(time.Second)}, nil
+}
+
+func (h *hostRun) writeReceipt(ctx context.Context) error {
+	r, err := h.receipt()
 	if err != nil {
 		return err
 	}
-	r := HostReceipt{Schema: receiptSchema, InstallID: h.cfg.InstallID, Version: h.cfg.Version, Commit: h.cfg.Commit,
-		Release: rel.Version, ServiceUID: h.cfg.ServiceUID, ServiceGID: h.cfg.ServiceGID,
-		InstalledAt: h.cfg.Now().UTC().Truncate(time.Second)}
 	b, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return err

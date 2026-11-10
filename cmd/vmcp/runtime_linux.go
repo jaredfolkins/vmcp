@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -11,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -94,11 +97,11 @@ func splitList(s string) []string {
 // root in a one-shot privileged container; AGENTS.md lists the flags.
 func hostCommand(ctx context.Context, args []string, out io.Writer, log *slog.Logger) error {
 	if len(args) == 0 {
-		return errors.New("usage: vmcp host check|install|teardown|status --install-id ID [flags]")
+		return errors.New("usage: vmcp host check|ensure|install|teardown|status --install-id ID [flags]")
 	}
 	command := args[0]
 	switch command {
-	case "check", "install", "teardown", "status":
+	case "check", "ensure", "install", "teardown", "status":
 	default:
 		return fmt.Errorf("unknown host command %q", command)
 	}
@@ -106,9 +109,13 @@ func hostCommand(ctx context.Context, args []string, out io.Writer, log *slog.Lo
 	installID := fs.String("install-id", "", "install identity that tags every host resource (required)")
 	hostRoot := fs.String("host-root", "/host", "directory that holds the host /etc as <host-root>/etc")
 	uid, gid := 65532, 65532
-	if command == "install" {
+	credentialFile := ""
+	if command == "install" || command == "ensure" {
 		fs.IntVar(&uid, "service-uid", uid, "UID of the vmcp service; the parent cgroup is delegated to it")
 		fs.IntVar(&gid, "service-gid", gid, "GID of the vmcp service")
+	}
+	if command == "ensure" {
+		fs.StringVar(&credentialFile, "credential-file", "", "create this caller credential file for the service user when it does not exist")
 	}
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -136,5 +143,48 @@ func hostCommand(ctx context.Context, args []string, out io.Writer, log *slog.Lo
 	if !res.OK {
 		return errReported
 	}
+	if credentialFile != "" {
+		created, err := ensureCredential(credentialFile, uid, gid)
+		if err != nil {
+			return fmt.Errorf("credential file: %w", err)
+		}
+		log.Info("credential file ready", "path", credentialFile, "created", created)
+	}
 	return nil
+}
+
+// ensureCredential creates the caller credential file when it does not
+// exist: 32 random bytes as hex, mode 0400, owned by the service user. It
+// never changes an existing file, and it reports whether it created one.
+func ensureCredential(path string, uid, gid int) (bool, error) {
+	if !filepath.IsAbs(path) {
+		return false, fmt.Errorf("%q must be an absolute path", path)
+	}
+	if fi, err := os.Lstat(path); err == nil {
+		if !fi.Mode().IsRegular() {
+			return false, fmt.Errorf("%s is not a regular file", path)
+		}
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return false, err
+	}
+	// Write under another name first, so that a reader never sees a
+	// partial credential.
+	tmp := path + ".new"
+	_ = os.Remove(tmp)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o400)
+	if err != nil {
+		return false, err
+	}
+	_, werr := f.WriteString(hex.EncodeToString(raw) + "\n")
+	cerr := f.Close()
+	if err := errors.Join(werr, cerr, os.Chown(tmp, uid, gid), os.Rename(tmp, path)); err != nil {
+		_ = os.Remove(tmp)
+		return false, err
+	}
+	return true, nil
 }

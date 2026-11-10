@@ -45,6 +45,9 @@ type hostSystem interface {
 	// runs. It returns errCgroupLocked when another process holds it. The
 	// returned function releases the lock.
 	lockCgroup(path string) (func(), error)
+	// capabilities returns an error unless the host command holds the
+	// capabilities that a write of host resources needs.
+	capabilities() error
 	// hostProcesses returns an error unless the host command sees the
 	// processes of the host and can read their file descriptors.
 	hostProcesses() error
@@ -212,6 +215,38 @@ func (k kernelHost) hostProcesses() error {
 			}
 			return nil
 		}
+	}
+	return errors.New("process status has no effective capability set")
+}
+
+func (k kernelHost) capabilities() error {
+	status, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		v, ok := strings.CutPrefix(line, "CapEff:")
+		if !ok {
+			continue
+		}
+		eff, err := strconv.ParseUint(strings.TrimSpace(v), 16, 64)
+		if err != nil {
+			return fmt.Errorf("parse effective capabilities: %w", err)
+		}
+		var missing []string
+		for _, c := range []struct {
+			bit  uint
+			name string
+		}{{unix.CAP_MAC_ADMIN, "CAP_MAC_ADMIN"}, {unix.CAP_SYS_ADMIN, "CAP_SYS_ADMIN"}, {unix.CAP_SYS_MODULE, "CAP_SYS_MODULE"},
+			{unix.CAP_CHOWN, "CAP_CHOWN"}, {unix.CAP_DAC_OVERRIDE, "CAP_DAC_OVERRIDE"}} {
+			if eff&(1<<c.bit) == 0 {
+				missing = append(missing, c.name)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("the host command lacks %s", strings.Join(missing, ", "))
+		}
+		return nil
 	}
 	return errors.New("process status has no effective capability set")
 }
