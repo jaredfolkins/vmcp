@@ -8,7 +8,7 @@ fail() {
 
 usage() {
   printf 'Usage: %s --check|--apply\n' "$0"
-  printf 'Prepare Ubuntu 24.04 AMD64 host packages and devices for the Firecracker backend.\n'
+  printf 'Prepare a Ubuntu 24.04 AMD64 host for the vmcp Compose install.\n'
   printf '%s\n' '--check makes no changes. --apply needs root and can change host packages and services.'
   printf '%s\n' 'Host package and service changes are not rolled back after a failure.'
 }
@@ -31,21 +31,27 @@ source /etc/os-release
 [[ "$(stat -fc %T /sys/fs/cgroup)" == cgroup2fs ]] || fail 'requires cgroup v2'
 grep -Eq '(^|[[:space:]])(vmx|svm)([[:space:]]|$)' /proc/cpuinfo ||
   fail 'CPU virtualization is unavailable; enable it in firmware or the outer VM'
+[[ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" == Y ]] ||
+  fail 'AppArmor is not enabled; install the apparmor package and boot the kernel with apparmor=1 security=apparmor'
 
-missing_packages=()
-command -v ip >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 || missing_packages+=(iproute2)
-command -v curl >/dev/null 2>&1 || missing_packages+=(curl)
-command -v tar >/dev/null 2>&1 || missing_packages+=(tar)
-command -v modprobe >/dev/null 2>&1 || missing_packages+=(kmod)
-command -v nft >/dev/null 2>&1 || missing_packages+=(nftables)
-command -v docker >/dev/null 2>&1 || missing_packages+=(docker.io)
+have_docker() { command -v docker >/dev/null 2>&1; }
+have_compose() { docker compose version >/dev/null 2>&1; }
 
 if [[ "$mode" == --apply ]]; then
   [[ "$(id -u)" -eq 0 ]] || fail '--apply requires root'
-  if ((${#missing_packages[@]})); then
-    printf 'Installing Ubuntu packages: %s\n' "${missing_packages[*]}"
+  if ! have_docker; then
+    # Docker Engine and the Compose plugin from the Docker apt repository.
+    printf 'Installing Docker Engine and the Compose plugin from download.docker.com\n'
+    export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing_packages[@]}"
+    apt-get install -y --no-install-recommends ca-certificates curl
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL "https://download.docker.com/linux/ubuntu/gpg" -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+    printf 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n' \
+      "$VERSION_CODENAME" >/etc/apt/sources.list.d/docker.list
+    apt-get update
+    apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-compose-plugin
   fi
   if [[ ! -e /dev/kvm ]]; then
     modprobe kvm
@@ -57,21 +63,20 @@ if [[ "$mode" == --apply ]]; then
   fi
   [[ -e /dev/net/tun ]] || modprobe tun
   if ! systemctl is-active --quiet docker; then
-    systemctl start docker
+    systemctl enable --now docker
   fi
 fi
 
-if ((${#missing_packages[@]})) && [[ "$mode" == --check ]]; then
-  fail "missing packages: ${missing_packages[*]}; run sudo $0 --apply"
-fi
-for command_name in ip tc curl tar modprobe nft docker; do
-  command -v "$command_name" >/dev/null 2>&1 || fail "missing command: $command_name"
-done
-[[ -r /dev/kvm && -w /dev/kvm ]] || fail '/dev/kvm is not readable and writable; check KVM and device access'
-[[ -r /dev/net/tun && -w /dev/net/tun ]] || fail '/dev/net/tun is not readable and writable; check TUN and device access'
+have_docker || fail "Docker is missing; run sudo $0 --apply"
+have_compose || fail 'the Docker Compose plugin is missing; install docker-compose-plugin (or docker-compose-v2 with docker.io)'
+[[ -e /dev/kvm ]] || fail "/dev/kvm is missing; run sudo $0 --apply"
+[[ -e /dev/net/tun ]] || fail "/dev/net/tun is missing; run sudo $0 --apply"
 systemctl is-active --quiet docker || fail 'Docker service is not active'
-docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -qv rootless ||
-  fail 'rootful Docker Engine is required'
+if [[ "$(id -u)" -eq 0 ]]; then
+  docker info --format '{{json .SecurityOptions}}' | grep -q apparmor ||
+    fail 'Docker does not use AppArmor'
+  docker info --format '{{json .SecurityOptions}}' | grep -qv rootless ||
+    fail 'rootful Docker Engine is required'
+fi
 
-printf 'Firecracker host preparation: package and device checks passed for Ubuntu 24.04 AMD64.\n'
-printf 'Next: run the install preflight with the exact accepted inputs.\n'
+printf 'Firecracker host preparation: checks passed for Ubuntu 24.04 AMD64. Next: docker compose up -d\n'

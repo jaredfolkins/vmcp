@@ -115,7 +115,8 @@
     ... is missing", and `docker compose up -d` repaired it.
   - The kernel log had zero `apparmor="DENIED"` lines for the profile.
     `vmcp host teardown` removed all 8 resources.
-  - A real host reboot is still NOT VERIFIED.
+  - A real host reboot passed on 2026-11-11 on all four supported hosts;
+    see [Supported hosts](#supported-hosts).
 - Live evidence of the service lock, the host nftables scan, and the
   mount-table posture check on 2026-10-08, commit `10d693d`, on the same
   host, with steps 1 to 6 of
@@ -186,8 +187,9 @@
   for `vmcp-live-gate` and no suppressed audit line.
 - `runtimes/firecracker/release/` bakes in Firecracker `1.16.0` and jailer
   `1.16.0`, linux/amd64, verified against the upstream archive.
-- `runtimes/firecracker/installers/` has Debian 12 and Ubuntu 24.04 amd64 host
-  preparation scripts. Only the OS identity gate was checked, in containers.
+- `runtimes/firecracker/installers/` has the amd64 host preparation
+  scripts for Debian 12 and 13 and Ubuntu 24.04 and 26.04. See
+  [Supported hosts](#supported-hosts) for their live evidence.
 - The remote is `git@github.com:jaredfolkins/vmcp.git`. The repository is
   public. Do not push the private data of any caller, credentials, host
   names, operator paths, or build outputs.
@@ -210,7 +212,8 @@ commit `5b4b833`. Steps 1, 2, 4, 5, and 6 ran again with commit
      --cap-add MAC_ADMIN --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE \
      --cap-add SYS_ADMIN --cap-add SYS_MODULE --cap-add SYS_PTRACE \
      --security-opt apparmor=unconfined \
-     -v /etc:/host/etc -v /lib/modules:/lib/modules:ro \
+     -v /etc:/host/etc -v /usr/lib/os-release:/host/usr/lib/os-release:ro \
+     -v /lib/modules:/lib/modules:ro \
      -v /sys/fs/cgroup:/sys/fs/cgroup \
      -v /sys/kernel/security:/sys/kernel/security \
      vmcp:dev host install --install-id live-gate
@@ -564,7 +567,41 @@ A caller uses vmcp in this order. Each step is a general API feature.
 | Runtime | OS | Version | Architecture | Folder |
 | --- | --- | --- | --- | --- |
 | firecracker | Debian | 12 | amd64 | `runtimes/firecracker/installers/linux/debian/12/amd64/` |
+| firecracker | Debian | 13 | amd64 | `runtimes/firecracker/installers/linux/debian/13/amd64/` |
 | firecracker | Ubuntu | 24.04 | amd64 | `runtimes/firecracker/installers/linux/ubuntu/24.04/amd64/` |
+| firecracker | Ubuntu | 26.04 | amd64 | `runtimes/firecracker/installers/linux/ubuntu/26.04/amd64/` |
+
+- The table, `supportedHosts` in `runtimes/firecracker/hostdistro.go`, and
+  the installer folders name the same hosts. `vmcp host check`, `install`,
+  and `ensure` read `ID` and `VERSION_ID` of the host os-release and
+  refuse a host outside the list. `--allow-unsupported-host` passes the
+  check; it does not make the host supported. The host commands need the
+  host `/usr/lib/os-release` at `<host-root>/usr/lib/os-release`, because
+  `/etc/os-release` is a link to it.
+- Add a host to the three places only after this passed on it, from a
+  fresh OS image: `prepare-host.sh --apply`, one `docker compose up -d`,
+  the self-test, a second `up` with 0 writes, a host reboot, and the
+  self-test again, with zero `apparmor="DENIED"` lines.
+- `scripts/host-matrix.sh` runs that sequence on every host of the table,
+  each in a fresh QEMU guest with nested KVM, from the upstream cloud
+  image. Live evidence on 2026-11-11, with Docker Engine 29.9.3 and
+  Compose 5.7.1 from the Docker apt repository:
+
+  | Host | Kernel | Result |
+  | --- | --- | --- |
+  | Debian 12 | 6.1.0-54-cloud-amd64 | passed |
+  | Debian 13 | 6.12.115+deb13.1-cloud-amd64 | passed |
+  | Ubuntu 24.04 | 6.8.0-147-generic | passed |
+  | Ubuntu 26.04 | 7.0.0-38-generic | passed |
+
+  On each host the first `up` wrote 8 resources, the second wrote 0, vmcp
+  was ready after the reboot with no `up`, both self-tests passed, and the
+  kernel log had zero `apparmor="DENIED"` lines for the profile. The
+  guests are cloud images on QEMU; bare metal and other clouds are NOT
+  VERIFIED beyond the Ubuntu 24.04 host of the live gate.
+- On a host without AppArmor, `status` and `teardown` work, and `check`,
+  `install`, and `ensure` fail the `apparmor` check. Proven on Debian 13
+  with an empty directory in place of the security file system.
 
 - The folder path is
   `runtimes/<runtime>/installers/<kernel>/<distribution>/<version>/<arch>/`. Use the
@@ -573,7 +610,7 @@ A caller uses vmcp in this order. Each step is a general API feature.
   cgroup v2, rootful Docker, and read-write `/dev/kvm` and `/dev/net/tun`.
 - A folder holds only facts and steps that differ by OS. The OS-neutral
   transaction belongs to `vmcp install`.
-- A new OS target needs its folder and a passing install live gate on that
+- A new OS target needs its folder and the passing sequence above on that
   OS. arm64 is not supported.
 
 ### Install always tears down first
@@ -678,9 +715,9 @@ service user on the `d` line, the `z` lines of the files fail.
 The first `w` line makes the cgroup root pass `cpu`, `memory`, and `pids`
 on to its children, because a host can run systemd-tmpfiles-setup before
 any unit needs them. Its path sorts before the parent cgroup. The service UID and
-GID come from `--service-uid` and `--service-gid`. The live gate
-simulated the boot of the parent cgroup only; a real host reboot is NOT
-VERIFIED (see [Current State](#current-state)).
+GID come from `--service-uid` and `--service-gid`. A real host reboot
+passed on all four supported hosts on 2026-11-11 (see
+[Supported hosts](#supported-hosts)).
 
 ### Failure and rollback
 - A failure before teardown leaves the host unchanged.
@@ -771,7 +808,8 @@ VERIFIED (see [Current State](#current-state)).
     --cap-add MAC_ADMIN --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE \
     --cap-add SYS_ADMIN --cap-add SYS_MODULE --cap-add SYS_PTRACE \
     --security-opt apparmor=unconfined \
-    -v /etc:/host/etc -v /lib/modules:/lib/modules:ro \
+    -v /etc:/host/etc -v /usr/lib/os-release:/host/usr/lib/os-release:ro \
+    -v /lib/modules:/lib/modules:ro \
     -v /sys/fs/cgroup:/sys/fs/cgroup \
     -v /sys/kernel/security:/sys/kernel/security \
     <vmcp image> host install --install-id <id>

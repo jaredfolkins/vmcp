@@ -4,6 +4,8 @@
 #   docker compose up -d
 #
 # The host needs Linux amd64 with /dev/kvm, cgroup v2, AppArmor, and Docker.
+# Supported hosts: Debian 12 and 13, Ubuntu 24.04 and 26.04. vmcp-host
+# refuses another distribution.
 #
 # vmcp-host runs once before each start of vmcp. It runs
 # `vmcp host ensure`, which writes only what is missing or differs: the
@@ -41,6 +43,8 @@ services:
       - apparmor=unconfined
     volumes:
       - /etc:/host/etc
+      # /etc/os-release is a link to this file on most hosts.
+      - /usr/lib/os-release:/host/usr/lib/os-release:ro
       - /lib/modules:/lib/modules:ro
       - /sys/fs/cgroup:/sys/fs/cgroup
       - /sys/kernel/security:/sys/kernel/security

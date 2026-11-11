@@ -84,6 +84,9 @@ type HostConfig struct {
 	// parent cgroup to them.
 	ServiceUID int
 	ServiceGID int
+	// AllowUnsupportedHost lets check, install, and ensure pass on a host
+	// distribution that is not in the supported list.
+	AllowUnsupportedHost bool
 	// Version and Commit identify this vmcp build in the receipt.
 	Version string
 	Commit  string
@@ -121,6 +124,9 @@ type HostResult struct {
 	InstallID string `json:"install_id"`
 	OK        bool   `json:"ok"`
 	Error     string `json:"error,omitempty"`
+	// HostOS is the ID and VERSION_ID of the host os-release, when a
+	// command read them.
+	HostOS string `json:"host_os,omitempty"`
 	// Installed is true when every resource of a complete install exists.
 	Installed bool `json:"installed"`
 	// ServiceRunning is true when a vmcp process holds the lock of an
@@ -259,6 +265,7 @@ func (h *hostRun) check(ctx context.Context) error {
 		}
 		return nil
 	}())
+	add("host-os", h.checkHostOS())
 	add("cgroup2", func() error {
 		// Install enables the controllers for the children of the root
 		// itself, so only their presence is a prerequisite.
@@ -278,10 +285,7 @@ func (h *hostRun) check(ctx context.Context) error {
 		// A command that writes needs these before it changes anything.
 		add("capabilities", h.sys.capabilities())
 	}
-	add("apparmor", func() error {
-		_, err := h.sys.loadedProfiles()
-		return err
-	}())
+	add("apparmor", h.sys.appArmor())
 	add("host-processes", h.sys.hostProcesses())
 	add("cpu-virtualization", func() error {
 		_, err := h.kvmModule()

@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jaredfolkins/vmcp/api"
 	"github.com/jaredfolkins/vmcp/internal/trace"
 )
 
@@ -252,6 +253,8 @@ func (f *fakeHost) hostProcesses() error { return f.procErr }
 
 func (f *fakeHost) capabilities() error { return nil }
 
+func (f *fakeHost) appArmor() error { return nil }
+
 func (f *fakeHost) cgroupWatchers(paths []string) ([]cgroupWatcher, error) {
 	if f.procErr != nil {
 		return nil, f.procErr
@@ -299,6 +302,11 @@ func newFakeHost(t *testing.T, id string, tc hostCase, log *slog.Logger) (*fakeH
 	write(filepath.Join(f.cgroups, "cgroup.subtree_control"), "cpu io memory pids\n")
 	write(filepath.Join(dir, "cpuinfo"), "processor\t: 0\nflags\t\t: fpu vme vmx sse\n")
 	if err := os.MkdirAll(filepath.Join(dir, "host", "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// As on a real host: /etc/os-release links to ../usr/lib/os-release.
+	write(filepath.Join(dir, "host", "usr", "lib", "os-release"), "ID=ubuntu\nVERSION_ID=\"24.04\"\n")
+	if err := os.Symlink("../usr/lib/os-release", filepath.Join(dir, "host", "etc", "os-release")); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range tc.Cgroups {
@@ -858,5 +866,82 @@ func TestHostEnsureRefusesForeignNames(t *testing.T) {
 	}
 	if len(f.modules) != 0 {
 		t.Errorf("ensure loaded modules %q on a blocked host", f.modules)
+	}
+}
+
+// TestHostOSCheck proves that check, install, and ensure refuse a host
+// distribution outside the supported list, read the host os-release and
+// not the one of the container, and pass with the allow flag.
+func TestHostOSCheck(t *testing.T) {
+	in := readHostInput(t)
+	set := func(cfg HostConfig, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(cfg.HostRoot, "usr", "lib", "os-release"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(res HostResult) api.Check {
+		t.Helper()
+		for _, c := range res.Checks {
+			if c.Name == "host-os" {
+				return c
+			}
+		}
+		t.Fatal("no host-os check")
+		return api.Check{}
+	}
+	for _, s := range SupportedHosts() {
+		id, version, _ := strings.Cut(s, " ")
+		_, cfg := newFakeHost(t, in.InstallID, hostCase{}, nil)
+		set(cfg, "NAME=x\nID="+id+"\nVERSION_ID=\""+version+"\"\n")
+		res := RunHostCommand(context.Background(), "ensure", cfg)
+		if !res.OK || res.HostOS != s {
+			t.Errorf("%s: ok %t host_os %q error %q", s, res.OK, res.HostOS, res.Error)
+		}
+	}
+	for _, body := range []string{"ID=ubuntu\nVERSION_ID=\"22.04\"\n", "ID=fedora\nVERSION_ID=42\n", "ID=debian\n"} {
+		f, cfg := newFakeHost(t, in.InstallID, hostCase{}, nil)
+		set(cfg, body)
+		for _, command := range []string{"check", "install", "ensure"} {
+			res := RunHostCommand(context.Background(), command, cfg)
+			if c := check(res); res.OK || c.OK || !strings.Contains(c.Detail, "not supported") || len(res.Written) != 0 {
+				t.Errorf("%s on %q: ok %t check %+v written %d", command, body, res.OK, c, len(res.Written))
+			}
+		}
+		if len(f.modules) != 0 {
+			t.Errorf("%q: loaded modules %q on an unsupported host", body, f.modules)
+		}
+		cfg.AllowUnsupportedHost = true
+		if res := RunHostCommand(context.Background(), "ensure", cfg); !res.OK {
+			t.Errorf("ensure with the allow flag on %q: %s", body, res.Error)
+		}
+	}
+	// Without the mount the link has no target under the host root.
+	_, cfg := newFakeHost(t, in.InstallID, hostCase{}, nil)
+	if err := os.Remove(filepath.Join(cfg.HostRoot, "usr", "lib", "os-release")); err != nil {
+		t.Fatal(err)
+	}
+	res := RunHostCommand(context.Background(), "ensure", cfg)
+	if c := check(res); res.OK || !strings.Contains(c.Detail, "mount the host /usr/lib/os-release") {
+		t.Errorf("no os-release: ok %t check %+v", res.OK, c)
+	}
+	// A link out of the host root is never followed.
+	_, cfg = newFakeHost(t, in.InstallID, hostCase{}, nil)
+	link := filepath.Join(cfg.HostRoot, "etc", "os-release")
+	_ = os.Remove(link)
+	if err := os.Symlink("../../outside", link); err != nil {
+		t.Fatal(err)
+	}
+	res = RunHostCommand(context.Background(), "ensure", cfg)
+	if c := check(res); res.OK || !strings.Contains(c.Detail, "leaves the host root") {
+		t.Errorf("escaping link: ok %t check %+v", res.OK, c)
+	}
+	// Status and teardown do not depend on the distribution.
+	_, cfg = newFakeHost(t, in.InstallID, hostCase{}, nil)
+	set(cfg, "ID=fedora\nVERSION_ID=42\n")
+	for _, command := range []string{"status", "teardown"} {
+		if res := RunHostCommand(context.Background(), command, cfg); !res.OK {
+			t.Errorf("%s on an unsupported host: %s", command, res.Error)
+		}
 	}
 }

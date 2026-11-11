@@ -98,9 +98,6 @@ that every item follows.
   memory hotplug defects, and (from `1.16.1`) reverts the jailer symlink
   restriction. It changes the snapshot format. Accept: the Firecracker live
   gate passes on the new pair.
-- **Debian 12 host check.** Run
-  `runtimes/firecracker/installers/linux/debian/12/amd64/prepare-host.sh`
-  on a real Debian 12 host with `--check` and `--apply`.
 - **License.** The repository is public and has no license. The user
   selects one.
 

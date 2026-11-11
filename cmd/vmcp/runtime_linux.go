@@ -110,6 +110,10 @@ func hostCommand(ctx context.Context, args []string, out io.Writer, log *slog.Lo
 	hostRoot := fs.String("host-root", "/host", "directory that holds the host /etc as <host-root>/etc")
 	uid, gid := 65532, 65532
 	credentialFile := ""
+	allowUnsupported := false
+	if command == "check" || command == "install" || command == "ensure" {
+		fs.BoolVar(&allowUnsupported, "allow-unsupported-host", false, "pass the host-os check on a distribution that vmcp does not support")
+	}
 	if command == "install" || command == "ensure" {
 		fs.IntVar(&uid, "service-uid", uid, "UID of the vmcp service; the parent cgroup is delegated to it")
 		fs.IntVar(&gid, "service-gid", gid, "GID of the vmcp service")
@@ -133,7 +137,7 @@ func hostCommand(ctx context.Context, args []string, out io.Writer, log *slog.Lo
 	res := firecracker.RunHostCommand(ctx, command, firecracker.HostConfig{
 		InstallID: *installID, HostRoot: filepath.Clean(*hostRoot), CgroupRoot: "/sys/fs/cgroup",
 		SecurityFS: "/sys/kernel/security", CPUInfo: "/proc/cpuinfo", ServiceUID: uid, ServiceGID: gid,
-		Version: version, Commit: commit, Logger: log,
+		AllowUnsupportedHost: allowUnsupported, Version: version, Commit: commit, Logger: log,
 	})
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")

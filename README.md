@@ -18,7 +18,7 @@ on a host and serves an HTTP API that runs and manages machines:
 
 | Runtime | Hosts | Status |
 | --- | --- | --- |
-| [Firecracker](runtimes/firecracker/) | Linux amd64: Debian 12, Ubuntu 24.04 | Firecracker and jailer `1.16.0` baked in; ephemeral machines |
+| [Firecracker](runtimes/firecracker/) | Linux amd64: Debian 12 and 13, Ubuntu 24.04 and 26.04 | Firecracker and jailer `1.16.0` baked in; ephemeral machines |
 | Apple [`container`](https://github.com/apple/container) | macOS 26, Apple silicon | Planned |
 
 One vmcp binary serves one runtime: the runtime of the OS it is built for.
@@ -56,11 +56,20 @@ One vmcp binary serves one runtime: the runtime of the OS it is built for.
 
 ## Quick start
 
-You need Linux amd64 with `/dev/kvm`, cgroup v2, AppArmor, and Docker.
+You need a supported host: Debian 12 or 13, or Ubuntu 24.04 or 26.04, on
+amd64 with CPU virtualization. The host preparation script installs Docker
+with the Compose plugin when the host has none and checks the rest:
 
 ```bash
+sudo runtimes/firecracker/installers/linux/ubuntu/24.04/amd64/prepare-host.sh --apply
 docker compose up -d
 ```
+
+Use the folder of your OS: `debian/12`, `debian/13`, `ubuntu/24.04`, or
+`ubuntu/26.04`. On each of them one `docker compose up -d` installed the
+host, the self-test passed, and vmcp came back ready after a host reboot.
+`vmcp-host` refuses another distribution or version. Its flag
+`--allow-unsupported-host` passes the check; such a host is not supported.
 
 [`compose.yaml`](compose.yaml) has two services. `vmcp-host` runs once
 before each start of `vmcp`. It runs `vmcp host ensure`, which installs the
@@ -112,7 +121,7 @@ each prints one JSON result.
 
 | Command | What it does |
 | --- | --- |
-| `check` | Checks root, the host `/etc` mount, cgroup v2, AppArmor, the host processes, and CPU virtualization. No change. |
+| `check` | Checks root, the host `/etc` mount, the host distribution, cgroup v2, AppArmor, the host processes, and CPU virtualization. No change. |
 | `ensure` | Runs `check`, then writes only the resources that are missing or differ from what this version writes. It removes nothing, and it does not need the service to stop. A second run changes nothing. With `--credential-file` it also creates the caller credential when the file does not exist. |
 | `install` | Runs `check` and `teardown`, then writes the seccomp profile, the AppArmor profile `vmcp-<id>` (loaded in enforce mode), the parent cgroup `vmcp-<id>` delegated to UID `65532`, `/etc/tmpfiles.d/vmcp-<id>.conf`, which creates that cgroup again at each host boot, and the KVM and TUN module file. It verifies them and writes `/etc/vmcp/<id>/receipt.json` last. |
 | `teardown` | Removes every host resource with the tag of the install, also from older vmcp versions. Refuses while the vmcp service of the install runs. |
@@ -163,9 +172,12 @@ runtimes/firecracker/installers/linux/ubuntu/24.04/amd64/prepare-host.sh --check
 sudo runtimes/firecracker/installers/linux/ubuntu/24.04/amd64/prepare-host.sh --apply
 ```
 
-`--check` makes no changes. `--apply` installs missing packages, loads the
-KVM and TUN modules, and starts Docker. Use the `debian/12` folder on
-Debian 12.
+`--check` makes no changes. `--apply` installs Docker Engine and the
+Compose plugin from the Docker apt repository when the host has no Docker,
+loads the KVM and TUN modules, and starts Docker. Both check the OS
+version, systemd, cgroup v2, CPU virtualization, AppArmor, and the Compose
+plugin. There is one folder for each supported OS: `debian/12`,
+`debian/13`, `ubuntu/24.04`, and `ubuntu/26.04`.
 
 ## API
 
@@ -179,6 +191,10 @@ The routes and types are in [`api/api.go`](api/api.go).
 | Drives and events | `PUT`, `GET /v1/machines/{id}/drives/{name}`, `GET /v1/machines/{id}/events` |
 | Exec and console | `POST /v1/machines/{id}/exec`, WebSocket `.../exec/{session}` and `.../console` |
 | Snapshots | `POST`, `GET /v1/machines/{id}/snapshots`, `POST .../restore`, `DELETE /v1/snapshots/{id}` |
+
+A drive upload is a tar stream. vmcp refuses one with more file content
+than the drive size, with more than one entry for each 4 KiB of the drive
+size plus 4096, or with a stream larger than both allow.
 
 ## Development
 

@@ -34,7 +34,8 @@ host_command() {
     --cap-add MAC_ADMIN --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE \
     --cap-add SYS_ADMIN --cap-add SYS_MODULE --cap-add SYS_PTRACE \
     --security-opt apparmor=unconfined \
-    -v /etc:/host/etc -v /lib/modules:/lib/modules:ro \
+    -v /etc:/host/etc -v /usr/lib/os-release:/host/usr/lib/os-release:ro \
+    -v /lib/modules:/lib/modules:ro \
     -v /sys/fs/cgroup:/sys/fs/cgroup \
     -v /sys/kernel/security:/sys/kernel/security \
     vmcp:dev host "$1" --install-id "$install_id"

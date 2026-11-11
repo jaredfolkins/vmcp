@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -38,5 +40,43 @@ func TestExtractDirDoesNotFollowSymlink(t *testing.T) {
 	}
 	if fi, err := os.Lstat(filepath.Join(dir, "a")); err != nil || !fi.IsDir() {
 		t.Errorf("a is not a directory in the drive: %v", err)
+	}
+}
+
+// TestExtractLimitsEntriesAndStream proves that a tar without file content
+// cannot write entries without end, and that skipped content counts.
+func TestExtractLimitsEntriesAndStream(t *testing.T) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for i := range tarMinEntries + 2 {
+		h := &tar.Header{Name: "f" + strconv.Itoa(i), Typeflag: tar.TypeReg, Mode: 0o644, Uid: os.Getuid(), Gid: os.Getgid()}
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err := extractTar(&buf, filepath.Join(t.TempDir(), "drive"), 0)
+	if err == nil || !strings.Contains(err.Error(), "entries") {
+		t.Errorf("many empty files: err = %v, want the entry limit", err)
+	}
+
+	// A skipped entry type has content that is not file content.
+	buf.Reset()
+	tw = tar.NewWriter(&buf)
+	body := make([]byte, tarMinEntries*tarEntryOverhead+4096)
+	if err := tw.WriteHeader(&tar.Header{Name: "x", Typeflag: 'Z', Size: int64(len(body))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err = extractTar(&buf, filepath.Join(t.TempDir(), "drive"), 0)
+	if err == nil || !strings.Contains(err.Error(), "stream") {
+		t.Errorf("large skipped entry: err = %v, want the stream limit", err)
 	}
 }

@@ -56,6 +56,8 @@ type hostSystem interface {
 	// watches its parent cgroup while it runs, also one without the lock.
 	cgroupWatchers(paths []string) ([]cgroupWatcher, error)
 
+	// appArmor fails when the kernel does not have AppArmor enabled.
+	appArmor() error
 	// loadedProfiles returns the mode of each loaded AppArmor profile.
 	loadedProfiles() (map[string]string, error)
 	// profileNames returns the profiles that a profile file defines.
@@ -345,8 +347,20 @@ func parseInotify(fdinfo []byte) []inotifyWatch {
 	return out
 }
 
+func (k kernelHost) appArmor() error {
+	if _, err := os.Stat(filepath.Join(k.securityFS, "apparmor", "profiles")); err != nil {
+		return errors.New("AppArmor is not enabled on this host; vmcp confines its service with an AppArmor profile")
+	}
+	return nil
+}
+
+// loadedProfiles returns no profile on a host without AppArmor, so that
+// status and teardown work there.
 func (k kernelHost) loadedProfiles() (map[string]string, error) {
 	b, err := os.ReadFile(filepath.Join(k.securityFS, "apparmor", "profiles"))
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]string{}, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read loaded AppArmor profiles: %w", err)
 	}
