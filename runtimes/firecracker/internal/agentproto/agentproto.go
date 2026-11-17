@@ -19,8 +19,10 @@ import (
 )
 
 // Version is the protocol version in Hello and Config. Version 3 adds
-// Config.Export. Version 4 adds the TypeStop host message.
-const Version = 4
+// Config.Export. Version 4 adds the TypeStop host message. Version 5 adds
+// Config.Ports, PortPort, and the TypeConnect host message, and is the
+// first version number with Config.Mounts.
+const Version = 5
 
 // Guest paths and devices.
 const (
@@ -41,6 +43,9 @@ const (
 const (
 	EventPort = 1024
 	DrivePort = 1025
+	// PortPort carries one relayed guest TCP connection per vsock
+	// connection. The guest opens it after a TypeConnect message.
+	PortPort = 1026
 )
 
 // Limits.
@@ -51,6 +56,8 @@ const (
 	MaxSecretsBytes = 24 << 20
 	// SecretRoot is the guest tmpfs that holds every secret file.
 	SecretRoot = "/run"
+	// MaxPortHeaderBytes bounds the one PortHeader line.
+	MaxPortHeaderBytes = 1 << 10
 )
 
 var configMagic = [8]byte{'V', 'M', 'C', 'P', 'C', 'F', 'G', '1'}
@@ -77,6 +84,9 @@ type Config struct {
 	// no Exit. The host boots this guest on the drives of a guest that
 	// ended without sending them.
 	Export bool `json:"export,omitempty"`
+	// Ports are the guest loopback TCP ports that the host may connect to.
+	// The agent refuses a TypeConnect message for any other port.
+	Ports []int `json:"ports,omitempty"`
 }
 
 // Drive is one spec drive.
@@ -178,6 +188,11 @@ const (
 	// SIGTERM to the process group, and SIGKILL when the process still runs
 	// after GraceMS. It then sends the drive tars as after a process exit.
 	TypeStop MessageType = "stop"
+	// TypeConnect is a host-to-guest message after TypeSecrets. The agent
+	// connects to the guest loopback TCP port Port, opens a PortPort
+	// connection, sends one PortHeader with ConnID, and then relays bytes
+	// in both directions until one side closes.
+	TypeConnect MessageType = "connect"
 )
 
 // Message is one newline-delimited JSON message on EventPort.
@@ -193,6 +208,9 @@ type Message struct {
 	GraceMS int64 `json:"grace_ms,omitempty"`
 	// Secrets is set only on TypeSecrets.
 	Secrets *Secrets `json:"secrets,omitempty"`
+	// ConnID and Port are set only on TypeConnect.
+	ConnID string `json:"conn_id,omitempty"`
+	Port   int    `json:"port,omitempty"`
 }
 
 // Secrets are the process environment entries and files that must not be
@@ -218,4 +236,13 @@ func (s *Secrets) Clear() {
 // follows it until the connection closes.
 type DriveHeader struct {
 	Name string `json:"name"`
+}
+
+// PortHeader is the first line on a PortPort connection. ConnID is the
+// value of the TypeConnect message. A non-empty Error reports that the agent
+// did not connect to the guest port; the agent then closes the connection.
+// Without an error, the bytes of the guest TCP connection follow.
+type PortHeader struct {
+	ConnID string `json:"conn_id"`
+	Error  string `json:"error,omitempty"`
 }

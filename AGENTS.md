@@ -25,9 +25,18 @@
   first release that declares the API stable.
 - `vmcp serve` implements health, status, self-test, images (create, list,
   get, delete), ephemeral machines (create, list, get, start, stop, delete),
-  drive upload and download, and event streams. Persistent machines, exec,
-  console, ports, and snapshots are not implemented; their routes answer
+  drive upload and download, event streams, and ports. Persistent machines,
+  exec, console, and snapshots are not implemented; their routes answer
   `not_found` and a persistent spec is refused.
+- Ports (part of V6) work for an ephemeral machine. `network.ports` names
+  guest loopback TCP ports. `GET /v1/machines/{id}/ports/{name}` with
+  `Upgrade: vmcp-port` relays a byte stream to one port. vmcp sends a
+  connect request on the agent event connection. The agent connects to
+  `127.0.0.1:<port>` and opens a relay connection to the host on vsock port
+  1026. The host never connects to a guest network address, no nftables
+  rule changes, and vmcp opens no new listener on a network. Unit tests
+  prove the agent relay, the host match, the route, and the Go client. The
+  Linux/KVM live gate for ports is NOT VERIFIED.
 - The self-test boots a machine from a built-in agent-only image. The guest
   proves that the vmcp port, metadata, private and direct destinations are
   unreachable and that the egress broker refuses metadata.
@@ -406,9 +415,12 @@ each machine leaves a zombie Firecracker process. Do not add `--init`.
 - Exec and console: the caller creates an exec session or attaches to the
   serial console, authorizes each user, and relays the WebSocket. Log the
   session start and end, not its content.
-- Ports: vmcp exposes a guest port only on the service network. The machine
-  response lists each endpoint. The caller authorizes and proxies user
-  traffic.
+- Ports: vmcp exposes a guest loopback TCP port only through the
+  authenticated `RouteConnectPort` upgrade on its API, which listens only on
+  the service network. The machine response lists the connect path of each
+  port as an endpoint. The agent refuses a port that the spec does not
+  name. The caller authorizes and proxies user traffic. Log the connection
+  start, not its content.
 - Snapshots: vmcp pauses the guest, saves memory, device state, and disk,
   and resumes it. Restore needs a stopped machine and the same runtime
   release that made the snapshot. Restore replaces the machine state in
@@ -975,7 +987,8 @@ shared mount ID or an unreadable mount table is a violation.
 ### Rules
 - A guest can reach only its brokers: DNS, policy-controlled public egress,
   the gateway when its spec asks for it, and the exact upstreams in its
-  spec. Exposed ports accept traffic only from the service network.
+  spec. An exposed port accepts traffic only through the authenticated API
+  on the service network.
 - Deny guest access to host loopback, host and private networks, cloud
   metadata, container bridges, and every other host service.
 - Never expose a Docker socket, host networking, host PID namespace, host

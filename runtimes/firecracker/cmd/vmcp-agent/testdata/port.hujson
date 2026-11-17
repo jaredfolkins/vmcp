@@ -1,0 +1,11 @@
+{
+  // The agent exposes one guest port. A connect request for it relays
+  // bytes. A connect request for another port gets a refusal header and
+  // never reaches a guest process.
+  "exposed_port": 5900,
+  "other_port": 22,
+  "conn_id": "0123456789abcdef",
+  "payload": "RFB 003.008\n",
+  "want_refusal": "the port is not exposed",
+  "deadline_ms": 3000,
+}

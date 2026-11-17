@@ -37,18 +37,24 @@ func readLine(r *bufio.Reader, limit int) ([]byte, error) {
 }
 
 // readHostMessages reads the host messages after Secrets until the
-// connection ends. A stop request goes to stop; other types are ignored.
-func (e *events) readHostMessages(stop *stopper) {
+// connection ends. A stop request goes to stop and a connect request to
+// ports; other types are ignored.
+func (e *events) readHostMessages(stop *stopper, ports *porter) {
 	for {
 		line, err := readLine(e.r, agentproto.MaxLineBytes)
 		if err != nil {
 			return
 		}
 		var m agentproto.Message
-		if json.Unmarshal(line, &m) != nil || m.Type != agentproto.TypeStop {
+		if json.Unmarshal(line, &m) != nil {
 			continue
 		}
-		stop.request(time.Duration(max(m.GraceMS, 0)) * time.Millisecond)
+		switch m.Type {
+		case agentproto.TypeStop:
+			stop.request(time.Duration(max(m.GraceMS, 0)) * time.Millisecond)
+		case agentproto.TypeConnect:
+			go ports.connect(m.ConnID, m.Port)
+		}
 	}
 }
 

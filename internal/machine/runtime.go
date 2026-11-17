@@ -5,7 +5,9 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"time"
 
 	"github.com/jaredfolkins/vmcp/api"
@@ -45,7 +47,23 @@ type Instance interface {
 	// Destroy kills a booted machine or removes one that never booted, and
 	// returns its result.
 	Destroy(ctx context.Context, reason string) Result
+	// DialPort opens a connection to a guest loopback TCP port that the
+	// spec exposes. It returns ErrPortNotExposed, ErrPortUnavailable, or an
+	// error that wraps ErrPortRefused.
+	DialPort(ctx context.Context, guestPort int) (net.Conn, error)
 }
+
+// Errors of Instance.DialPort.
+var (
+	// ErrPortNotExposed reports a port that the machine spec does not name.
+	ErrPortNotExposed = errors.New("the guest port is not exposed")
+	// ErrPortUnavailable reports a guest that is not running or whose agent
+	// did not answer.
+	ErrPortUnavailable = errors.New("the guest is not available")
+	// ErrPortRefused reports that the guest agent did not connect to the
+	// port, for example because no guest process listens on it.
+	ErrPortRefused = errors.New("the guest refused the port connection")
+)
 
 // ImageInfo describes a prepared image.
 type ImageInfo struct {

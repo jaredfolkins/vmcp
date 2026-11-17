@@ -1,0 +1,9 @@
+{
+  // A machine that exposes one guest port. The fake guest agent answers a
+  // connect request with a relay connection, or with a refusal.
+  "guest_port": 5900,
+  "other_port": 22,
+  "payload": "RFB 003.008\n",
+  "refusal": "the guest port refused the connection",
+  "deadline_ms": 3000,
+}

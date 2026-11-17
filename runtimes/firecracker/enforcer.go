@@ -32,7 +32,7 @@ const (
 var jailFiles = map[string]bool{
 	"firecracker": true, "firecracker.pid": true, "vmlinux": true, "rootfs.ext4": true,
 	"config.bin": true, "config.json": true, "upper.ext4": true, ".vmcp-owner": true,
-	"v.sock": true, "v.sock_1024": true, "v.sock_1025": true, "fc.sock": true,
+	"v.sock": true, "v.sock_1024": true, "v.sock_1025": true, "v.sock_1026": true, "fc.sock": true,
 }
 
 // jailDevices are the device nodes that the jailer creates.

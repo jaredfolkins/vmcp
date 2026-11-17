@@ -73,13 +73,20 @@ func run(ev *events) (code int, export bool, err error) {
 	}
 	defer secrets.Clear()
 	stop := &stopper{}
-	go ev.readHostMessages(stop)
+	ports := newPorter()
+	go ev.readHostMessages(stop, ports)
 	cfg, err := readConfig()
 	if err != nil {
 		return 0, false, err
 	}
 	if cfg.Export {
 		return 0, true, exportDrives(cfg)
+	}
+	if len(cfg.Ports) > 0 {
+		if err := loopbackUp(); err != nil {
+			return 0, false, err
+		}
+		ports.allow(cfg.Ports)
 	}
 	if err := buildRoot(cfg, secrets); err != nil {
 		return 0, false, err

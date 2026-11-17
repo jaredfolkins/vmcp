@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -42,6 +43,7 @@ const (
 	maxDriveMiB        = 64 << 10
 	maxDrives          = 16
 	maxMountUploads    = 64
+	maxPorts           = 8
 	maxFiles           = 512
 	maxFileBytes       = 1 << 20
 	maxTotalFileBytes  = 16 << 20
@@ -392,7 +394,7 @@ func (m *Manager) CreateMachine(ctx context.Context, spec api.MachineSpec) (api.
 		traceCtx: trace.Detach(ctx),
 		rec: record{
 			Machine: api.Machine{ID: id, Name: spec.Name, Lifecycle: spec.Lifecycle, Labels: spec.Labels,
-				Image: spec.Image, State: api.StateCreated, CreatedAt: now, UpdatedAt: now},
+				Image: spec.Image, State: api.StateCreated, Endpoints: endpoints(id, spec), CreatedAt: now, UpdatedAt: now},
 			SpecHash: hash, Slot: slot, Spec: sanitize(spec),
 		},
 		finished: make(chan struct{}),
@@ -448,12 +450,24 @@ func (m *Manager) validate(spec api.MachineSpec) error {
 		return errorf(api.ErrInvalidRequest, "lifecycle must be ephemeral or persistent")
 	case spec.TimeoutSeconds <= 0:
 		return errorf(api.ErrInvalidRequest, "an ephemeral machine needs timeout_seconds")
-	case len(spec.Network.Ports) > 0:
-		return errorf(api.ErrInvalidRequest, "ports apply only to a persistent machine")
+	case len(spec.Network.Ports) > maxPorts:
+		return errorf(api.ErrInvalidRequest, "too many ports")
 	case spec.Resources.VCPUs < 0 || spec.Resources.VCPUs > 32 || spec.Resources.MemoryMiB < 0 || spec.Resources.MemoryMiB > 64<<10:
 		return errorf(api.ErrInvalidRequest, "resources are out of range")
 	case len(spec.Drives) > maxDrives || len(spec.Files) > maxFiles || len(spec.Labels) > maxLabels:
 		return errorf(api.ErrInvalidRequest, "too many drives, files, or labels")
+	}
+	portNames, guestPorts := map[string]bool{}, map[int]bool{}
+	for _, p := range spec.Network.Ports {
+		switch {
+		case !driveRE.MatchString(p.Name) || portNames[p.Name]:
+			return errorf(api.ErrInvalidRequest, "port name %q is invalid or repeated", p.Name)
+		case p.GuestPort < 1 || p.GuestPort > 65535 || guestPorts[p.GuestPort]:
+			return errorf(api.ErrInvalidRequest, "port %q guest_port is out of range or repeated", p.Name)
+		case p.Protocol != api.PortProtocolTCP:
+			return errorf(api.ErrInvalidRequest, "port %q protocol must be %s", p.Name, api.PortProtocolTCP)
+		}
+		portNames[p.Name], guestPorts[p.GuestPort] = true, true
 	}
 	seen := map[string]bool{}
 	for _, d := range spec.Drives {
@@ -560,6 +574,58 @@ func newID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return "m-" + hex.EncodeToString(b)
+}
+
+// endpoints lists the connect route of each exposed port of a machine.
+func endpoints(id string, spec api.MachineSpec) []api.Endpoint {
+	var out []api.Endpoint
+	_, path, _ := strings.Cut(api.RouteConnectPort, " ")
+	for _, p := range spec.Network.Ports {
+		out = append(out, api.Endpoint{Port: p.Name,
+			Address: strings.NewReplacer("{id}", id, "{name}", p.Name).Replace(path)})
+	}
+	return out
+}
+
+// DialPort opens a connection to the exposed port name of a running
+// machine. The caller owns the connection and closes it. The lines of the
+// connection log its start, never its content.
+func (m *Manager) DialPort(ctx context.Context, id, name string) (net.Conn, error) {
+	m.mu.Lock()
+	en := m.machines[id]
+	if en == nil {
+		m.mu.Unlock()
+		return nil, errorf(api.ErrNotFound, "machine not found")
+	}
+	guestPort := 0
+	for _, p := range en.rec.Spec.Network.Ports {
+		if p.Name == name {
+			guestPort = p.GuestPort
+		}
+	}
+	state, inst, log := en.rec.Machine.State, en.inst, en.log
+	m.mu.Unlock()
+	switch {
+	case guestPort == 0:
+		return nil, errorf(api.ErrNotFound, "port not found")
+	case state != api.StateRunning || inst == nil:
+		return nil, errorf(api.ErrConflict, "machine is not running")
+	}
+	conn, err := inst.DialPort(ctx, guestPort)
+	switch {
+	case err == nil:
+		log.InfoContext(ctx, "machine port connected", "port", name, "guest_port", guestPort)
+		return conn, nil
+	case errors.Is(err, ErrPortRefused):
+		log.InfoContext(ctx, "machine port refused", "code", "port_refused", "port", name, "guest_port", guestPort)
+		return nil, errorf(api.ErrUnavailable, "the guest port refused the connection")
+	case errors.Is(err, ErrPortNotExposed):
+		return nil, errorf(api.ErrNotFound, "port not found")
+	default:
+		log.WarnContext(ctx, "machine port unavailable", "code", "port_unavailable", "port", name,
+			"guest_port", guestPort, "error", trace.BoundedError(err))
+		return nil, errorf(api.ErrUnavailable, "the guest did not open the port connection")
+	}
 }
 
 // Machine returns one machine.
