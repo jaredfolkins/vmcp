@@ -7,12 +7,15 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jaredfolkins/vmcp/api"
 	"github.com/jaredfolkins/vmcp/internal/machine"
@@ -37,6 +40,7 @@ type Service interface {
 	PutDrive(ctx context.Context, id, name string, r io.Reader) error
 	GetDrive(ctx context.Context, id, name string) (*os.File, error)
 	Events(ctx context.Context, id string, after uint64, follow bool, fn func(api.Event) error) error
+	DialPort(ctx context.Context, id, name string) (net.Conn, error)
 	SelfTest(ctx context.Context) (api.SelfTestResult, error)
 }
 
@@ -104,6 +108,7 @@ func New(cfg Config) http.Handler {
 		api.RoutePutDrive:      s.putDrive,
 		api.RouteGetDrive:      s.getDrive,
 		api.RouteMachineEvents: s.events,
+		api.RouteConnectPort:   s.connectPort,
 		api.RouteSelfTest:      func(w http.ResponseWriter, r *http.Request) { s.reply(w, http.StatusOK)(s.svc.SelfTest(r.Context())) },
 	}
 	for pattern, h := range routes {
@@ -379,4 +384,46 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// connectPort upgrades the request to a raw byte stream to one exposed
+// guest port. It relays until one side closes.
+func (s *server) connectPort(w http.ResponseWriter, r *http.Request) {
+	if !strings.EqualFold(r.Header.Get("Upgrade"), api.UpgradePort) {
+		writeError(w, http.StatusBadRequest, api.ErrInvalidRequest, fmt.Sprintf("the request needs the header Upgrade: %s", api.UpgradePort))
+		return
+	}
+	guest, err := s.svc.DialPort(r.Context(), r.PathValue("id"), r.PathValue("name"))
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	defer func() { _ = guest.Close() }()
+	caller, buffered, err := http.NewResponseController(w).Hijack()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, api.ErrInternal, "the connection cannot be upgraded")
+		return
+	}
+	defer func() { _ = caller.Close() }()
+	if rec, ok := w.(*recorder); ok {
+		rec.status, rec.wrote = http.StatusSwitchingProtocols, true
+	}
+	_ = caller.SetDeadline(time.Time{})
+	response := fmt.Sprintf("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: %s\r\n\r\n", api.UpgradePort)
+	if _, err := buffered.WriteString(response); err != nil || buffered.Flush() != nil {
+		return
+	}
+	done := make(chan struct{}, 2)
+	go func() {
+		// buffered holds any byte that the caller sent after its request.
+		_, _ = io.Copy(guest, buffered)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(caller, guest)
+		done <- struct{}{}
+	}()
+	// The end of one direction ends the stream. The deferred closes end
+	// the other copy.
+	<-done
 }

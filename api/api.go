@@ -42,6 +42,12 @@ const (
 	// RouteGetDrive returns a writable drive as a tar body. The machine must
 	// not be running.
 	RouteGetDrive = "GET /v1/machines/{id}/drives/{name}"
+	// RouteConnectPort upgrades to a raw byte stream to one exposed guest
+	// port of a running machine. The request has the headers
+	// "Connection: Upgrade" and "Upgrade: vmcp-port" (UpgradePort). vmcp
+	// answers 101 and then relays bytes in both directions until one side
+	// closes. The caller authorizes its users and proxies their traffic.
+	RouteConnectPort = "GET /v1/machines/{id}/ports/{name}"
 
 	// RouteCreateExec starts a process in a running persistent machine.
 	RouteCreateExec = "POST /v1/machines/{id}/exec"
@@ -140,7 +146,8 @@ type Network struct {
 	// public addresses. Each connection and flow is a flow event.
 	Gateway   bool       `json:"gateway,omitempty"`
 	Upstreams []Upstream `json:"upstreams,omitempty"`
-	// Ports apply only to a persistent machine.
+	// Ports are the guest loopback TCP ports that the caller reaches through
+	// RouteConnectPort. A port needs no guest network device.
 	Ports []Port `json:"ports,omitempty"`
 }
 
@@ -154,12 +161,20 @@ type Upstream struct {
 	AllowWrite bool   `json:"allow_write,omitempty"`
 }
 
-// Port is one guest port that vmcp exposes on its service network.
+// Port is one guest loopback TCP port that the caller can connect to.
 type Port struct {
 	Name      string `json:"name"`
 	GuestPort int    `json:"guest_port"`
-	Protocol  string `json:"protocol"`
+	// Protocol must be PortProtocolTCP.
+	Protocol string `json:"protocol"`
 }
+
+const (
+	// PortProtocolTCP is the one port protocol.
+	PortProtocolTCP = "tcp"
+	// UpgradePort is the Upgrade header value of RouteConnectPort.
+	UpgradePort = "vmcp-port"
+)
 
 // Drive is a guest directory backed by its own disk image.
 type Drive struct {
@@ -267,7 +282,8 @@ type Machine struct {
 	UpdatedAt time.Time         `json:"updated_at"`
 }
 
-// Endpoint is the service-network address of one exposed port.
+// Endpoint names one exposed port. Address is the path of its
+// RouteConnectPort request on the vmcp API.
 type Endpoint struct {
 	Port    string `json:"port"`
 	Address string `json:"address"`

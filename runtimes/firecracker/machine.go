@@ -86,10 +86,13 @@ type Machine struct {
 	// eventConn is the agent event connection, set after Secrets were
 	// sent. A stop request goes on it.
 	eventConn net.Conn
-	exit      *api.Exit
-	posture   map[string]any
-	done      chan struct{}
-	result    machine.Result
+	// portPending holds the DialPort calls that wait for the relay
+	// connection of the guest agent, by connection ID.
+	portPending map[string]chan portDial
+	exit        *api.Exit
+	posture     map[string]any
+	done        chan struct{}
+	result      machine.Result
 }
 
 // Provision builds the jail, drives, network, and brokers of a machine. It
@@ -244,6 +247,7 @@ func (m *Machine) writeConfigs() error {
 		Env:     append([]string(nil), m.spec.Env...),
 		Dir:     m.spec.WorkDir,
 		User:    m.spec.User,
+		Ports:   m.guestPorts(),
 	}
 	for i, d := range m.spec.Spec.Drives {
 		cfg.Drives = append(cfg.Drives, agentproto.Drive{
@@ -369,6 +373,21 @@ func (m *Machine) listen() error {
 	m.listenWG.Add(2)
 	go m.acceptEvents(m.lns[0])
 	go m.acceptDrives(m.lns[1])
+	if len(m.spec.Spec.Network.Ports) == 0 {
+		return nil
+	}
+	// Only a machine with exposed ports has the relay socket.
+	p := filepath.Join(m.jailRoot, fmt.Sprintf("v.sock_%d", agentproto.PortPort))
+	ln, err := net.Listen("unix", p)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", filepath.Base(p), err)
+	}
+	m.lns = append(m.lns, ln)
+	if err := os.Chown(p, m.uid, m.uid); err != nil {
+		return err
+	}
+	m.listenWG.Add(1)
+	go m.acceptPorts(ln)
 	return nil
 }
 
@@ -509,7 +528,12 @@ func (m *Machine) Stop(reason string, grace time.Duration) {
 
 // sendStop writes the stop request on the agent event connection.
 func (m *Machine) sendStop(conn net.Conn, grace time.Duration) error {
-	raw, err := json.Marshal(agentproto.Message{Type: agentproto.TypeStop, GraceMS: grace.Milliseconds()})
+	return m.sendHost(conn, agentproto.Message{Type: agentproto.TypeStop, GraceMS: grace.Milliseconds()})
+}
+
+// sendHost writes one host message on the agent event connection.
+func (m *Machine) sendHost(conn net.Conn, msg agentproto.Message) error {
+	raw, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}

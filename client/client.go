@@ -216,6 +216,31 @@ func (c *Client) Events(ctx context.Context, id string, after uint64, follow boo
 	return nil
 }
 
+// DialPort opens a byte stream to the exposed port name of a running
+// machine. vmcp relays the stream to the guest loopback TCP port of that
+// name. The caller closes the stream. A context that ends closes it too.
+func (c *Client) DialPort(ctx context.Context, id, name string) (io.ReadWriteCloser, error) {
+	req, err := c.request(ctx, api.RouteConnectPort, map[string]string{"id": id, "name": name}, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", api.UpgradePort)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("vmcp %s %s: %w", req.Method, req.URL.Path, err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		return nil, responseError(resp)
+	}
+	stream, ok := resp.Body.(io.ReadWriteCloser)
+	if !ok {
+		_ = resp.Body.Close()
+		return nil, errors.New("the vmcp transport does not support a protocol upgrade")
+	}
+	return stream, nil
+}
+
 func (c *Client) do(ctx context.Context, route string, params map[string]string, q url.Values, in, out any) error {
 	var body io.Reader
 	if in != nil {
@@ -285,13 +310,18 @@ func (c *Client) send(req *http.Request) (*http.Response, error) {
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return resp, nil
 	}
+	return nil, responseError(resp)
+}
+
+// responseError reads and closes an error response and returns its *Error.
+func responseError(resp *http.Response) error {
 	defer func() { _ = resp.Body.Close() }()
 	var er api.ErrorResponse
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes))
 	if json.Unmarshal(raw, &er) != nil || er.Error.Code == "" {
 		er.Error = api.Error{Code: api.ErrInternal, Message: http.StatusText(resp.StatusCode)}
 	}
-	return nil, &Error{Status: resp.StatusCode, Code: er.Error.Code, Message: er.Error.Message,
+	return &Error{Status: resp.StatusCode, Code: er.Error.Code, Message: er.Error.Message,
 		TraceID: traceIDOf(resp.Header.Get(api.HeaderTraceparent))}
 }
 

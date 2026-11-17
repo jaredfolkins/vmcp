@@ -1,0 +1,26 @@
+{
+  // A running machine that exposes two guest loopback TCP ports. The guest
+  // serves the first. No guest process listens on the second.
+  "relay": {
+    "program": "hang",
+    "machine_name": "desktop",
+    "deadline_ms": 5000,
+    "port_name": "vnc",
+    "guest_port": 5900,
+    "refused_port_name": "idle",
+    "refused_guest_port": 6000,
+    "unknown_port_name": "ssh",
+    "payload": "RFB 003.008\n",
+    "want_endpoint_suffix": "/ports/vnc",
+  },
+  // Port specs that create must refuse with invalid_request.
+  "invalid_specs": [
+    {"name": "port name with an upper-case letter", "ports": [{"name": "VNC", "guest_port": 5900, "protocol": "tcp"}]},
+    {"name": "repeated port name", "ports": [{"name": "vnc", "guest_port": 5900, "protocol": "tcp"}, {"name": "vnc", "guest_port": 5901, "protocol": "tcp"}]},
+    {"name": "repeated guest port", "ports": [{"name": "a", "guest_port": 5900, "protocol": "tcp"}, {"name": "b", "guest_port": 5900, "protocol": "tcp"}]},
+    {"name": "guest port zero", "ports": [{"name": "vnc", "guest_port": 0, "protocol": "tcp"}]},
+    {"name": "guest port above the TCP range", "ports": [{"name": "vnc", "guest_port": 65536, "protocol": "tcp"}]},
+    {"name": "protocol that is not tcp", "ports": [{"name": "dns", "guest_port": 53, "protocol": "udp"}]},
+    {"name": "missing protocol", "ports": [{"name": "vnc", "guest_port": 5900}]},
+  ],
+}

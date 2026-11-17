@@ -4,8 +4,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -43,6 +45,8 @@ type fakeRuntime struct {
 	boots atomic.Int32
 	// stops records each graceful stop: the reason and the grace.
 	stops []fakeStop
+	// refusedGuestPort is an exposed guest port with no guest listener.
+	refusedGuestPort int
 }
 
 func (f *fakeRuntime) ImageCompatibility() string {
@@ -195,6 +199,28 @@ func (i *fakeInstance) Kill(reason string) {
 	default:
 	}
 }
+
+// DialPort answers as a guest whose exposed ports echo every byte, except
+// refusedGuestPort, where no guest process listens.
+func (i *fakeInstance) DialPort(_ context.Context, guestPort int) (net.Conn, error) {
+	exposed := false
+	for _, p := range i.l.Spec.Network.Ports {
+		exposed = exposed || p.GuestPort == guestPort
+	}
+	switch {
+	case !exposed:
+		return nil, machine.ErrPortNotExposed
+	case guestPort == i.rt.refusedGuestPort:
+		return nil, fmt.Errorf("%w: connection refused", machine.ErrPortRefused)
+	}
+	host, guest := net.Pipe()
+	go func() {
+		_, _ = io.Copy(guest, guest)
+		_ = guest.Close()
+	}()
+	return host, nil
+}
+
 func (i *fakeInstance) Done() <-chan struct{}  { return i.done }
 func (i *fakeInstance) Result() machine.Result { <-i.done; return i.result }
 func (i *fakeInstance) Destroy(_ context.Context, reason string) machine.Result {

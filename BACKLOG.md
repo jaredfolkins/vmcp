@@ -66,7 +66,12 @@ that every item follows.
 2. **V5 Persistent machines.** Root disk, drives, stop, start, restart,
    restart policy, and preservation across upgrade. Accept: live gate.
 3. **V6 Exec, console, and ports.** Accept: live gate with allowed and
-   denied access, and a relay test through the Go client.
+   denied access, and a relay test through the Go client. Ports for an
+   ephemeral machine are implemented on branch `feat/guest-ports`, selected
+   by the user on 2026-11-16 before V5, with the relay test through the Go
+   client (`TestPortRelayThroughClient`). Open: the live gate for ports
+   (allowed relay, refused unexposed port, no leaked relay socket after
+   teardown), exec, and console.
 4. **V7 Snapshots.** Create, list, restore, and delete. Accept: live gate,
    including a refused restore across releases.
 5. **V8 Release lane.** Build, record, and publish the vmcp image with
