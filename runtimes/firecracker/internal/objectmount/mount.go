@@ -9,10 +9,12 @@
 // in guest memory within the write-back budget of the mount, and the whole
 // file goes on flush, fsync, and release. A file that does not fit fails
 // with EFBIG. A file is stored when its last descriptor closes, or on a
-// close or fsync by the opening process after a write; a read of a file that
-// is being written waits for that. A rename copies the file through the
-// mount. The protocol has no empty folders: mkdir makes a folder in memory,
-// which lasts until the mount ends or a file is written below it.
+// close or fsync by the opening process after a write; a read of a file
+// that is being written waits for that. After Server.Stopping, only fsync
+// stores a file. A rename copies the file through the mount. The protocol has no empty folders:
+// mkdir makes a folder in memory, which lasts until the mount ends or a file
+// is written below it. A file keeps its permission bits through the mode
+// header of the protocol; a read fetches at least 4 MiB per request.
 package objectmount
 
 import (
@@ -20,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"syscall"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -81,6 +84,14 @@ func (s *Server) Close(wait time.Duration) error {
 	return errors.Join(errs...)
 }
 
+// Stopping marks the end of a stopped job: from now on a file is stored only
+// by fsync. A close or a release drops the file and cuts an open stream, so
+// the upstream aborts the upload and keeps the earlier object.
+func (s *Server) Stopping() { s.st.stopping.Store(true) }
+
+// Dropped reports the files that the mount did not store after Stopping.
+func (s *Server) Dropped() int64 { return s.st.dropped.Load() }
+
 // Mount serves the mount at dir until Close.
 func Mount(dir string, opt Options) (*Server, error) {
 	if opt.URL == "" || opt.WriteBack == nil || opt.MaxBytes <= 0 || opt.Uploads <= 0 || opt.SmallFile <= 0 {
@@ -102,13 +113,22 @@ func Mount(dir string, opt Options) (*Server, error) {
 		st.proc = "/proc"
 	}
 	second := time.Second
+	mountOptions := fuse.MountOptions{
+		FsName:      "vmcp-object",
+		Name:        "vmcp",
+		AllowOther:  opt.AllowOther,
+		DirectMount: opt.DirectMount,
+	}
+	// A read-only mount is read-only in the kernel too.
+	if opt.ReadOnly {
+		if opt.DirectMount {
+			mountOptions.DirectMountFlags = syscall.MS_NOSUID | syscall.MS_NODEV | syscall.MS_RDONLY
+		} else {
+			mountOptions.Options = append(mountOptions.Options, "ro")
+		}
+	}
 	server, err := fs.Mount(dir, &dirNode{st: st}, &fs.Options{
-		MountOptions: fuse.MountOptions{
-			FsName:      "vmcp-object",
-			Name:        "vmcp",
-			AllowOther:  opt.AllowOther,
-			DirectMount: opt.DirectMount,
-		},
+		MountOptions:    mountOptions,
 		EntryTimeout:    &second,
 		AttrTimeout:     &second,
 		NegativeTimeout: &second,

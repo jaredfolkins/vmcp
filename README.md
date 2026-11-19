@@ -205,9 +205,13 @@ write uses a write-back buffer within one quarter of the guest memory,
 shared by the mounts. A file is stored when its last descriptor closes, and
 it keeps its permission bits through the mode header. A read fetches at
 least 4 MiB per request. A writable mount needs an
-upstream with `allow_write`; `read_only` refuses writes. After the process
-exits, the agent waits up to 60 seconds for the last uploads and reports
-each mount as an `object-mount <path>` step.
+upstream with `allow_write`; `read_only` mounts the folder read-only in the
+guest kernel. After a stop request, also a timeout and an output limit,
+only `fsync` stores a file: a close cuts an open upload, so the upstream
+keeps the earlier object. A guest kill cuts every open upload the same way.
+After the process exits, the agent waits up to 60 seconds for the last
+uploads and reports each mount as an `object-mount <path>` step, with the
+number of files that it did not store after a stop.
 
 ## Development
 

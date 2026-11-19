@@ -192,9 +192,11 @@ type Drive struct {
 // A mode is the octal permission bits, such as "0644". The upstream may
 // keep a coarser set of modes; HEAD answers the mode that it keeps.
 //
-// A write becomes visible only when its whole body is stored. 413 refuses a
-// body that is too large, 429 a write while the upstream is busy, and 401 a
-// request after the upstream stopped accepting the token.
+// A write becomes visible only when its whole body is stored; an upload
+// that ends early, as at a stop or a guest kill, stores nothing. After a
+// stop request, the guest stores only the files that a process syncs. 413
+// refuses a body that is too large, 429 a write while the upstream is busy,
+// and 401 a request after the upstream stopped accepting the token.
 type Mount struct {
 	// GuestPath is a clean absolute guest folder.
 	GuestPath string `json:"guest_path"`
@@ -203,8 +205,9 @@ type Mount struct {
 	Upstream string `json:"upstream"`
 	// Path is the clean absolute upstream path of the mount root, such as
 	// "/public".
-	Path     string `json:"path"`
-	ReadOnly bool   `json:"read_only,omitempty"`
+	Path string `json:"path"`
+	// ReadOnly mounts the folder read-only in the guest kernel.
+	ReadOnly bool `json:"read_only,omitempty"`
 	// MaxBytes is the largest object that one write may store: the
 	// declared size of a chunked write. The upstream refuses a larger one.
 	MaxBytes int64 `json:"max_bytes"`

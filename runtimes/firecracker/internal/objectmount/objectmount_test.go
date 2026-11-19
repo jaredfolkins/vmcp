@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -25,18 +26,19 @@ import (
 var objectMountTestConfig = flag.String("vmcp-objectmount-config", "testdata/objectmount.hujson", "HuJSON file for the object mount tests")
 
 type objectMountTestInput struct {
-	SmallFile      int   `json:"small_file"`
-	Uploads        int   `json:"uploads"`
-	MaxBytes       int64 `json:"max_bytes"`
-	WriteBack      int64 `json:"write_back"`
-	SmallSize      int   `json:"small_size"`
-	LargeSize      int   `json:"large_size"`
-	OverBudgetSize int   `json:"over_budget_size"`
-	OverMaxSize    int   `json:"over_max_size"`
-	ReadAheadSize  int   `json:"read_ahead_size"`
-	ReadBlock      int   `json:"read_block"`
-	MaxGets        int   `json:"max_gets"`
-	EntryWaitMS    int   `json:"entry_wait_ms"`
+	SmallFile      int    `json:"small_file"`
+	Uploads        int    `json:"uploads"`
+	MaxBytes       int64  `json:"max_bytes"`
+	WriteBack      int64  `json:"write_back"`
+	SmallSize      int    `json:"small_size"`
+	LargeSize      int    `json:"large_size"`
+	OverBudgetSize int    `json:"over_budget_size"`
+	OverMaxSize    int    `json:"over_max_size"`
+	EarlierBody    string `json:"earlier_body"`
+	ReadAheadSize  int    `json:"read_ahead_size"`
+	ReadBlock      int    `json:"read_block"`
+	MaxGets        int    `json:"max_gets"`
+	EntryWaitMS    int    `json:"entry_wait_ms"`
 	Shell          []struct {
 		Name       string `json:"name"`
 		Script     string `json:"script"`
@@ -62,7 +64,8 @@ func readObjectMountTestInput(t *testing.T) objectMountTestInput {
 		t.Fatal(err)
 	}
 	if in.SmallSize > in.SmallFile || in.LargeSize <= in.SmallFile || in.OverBudgetSize <= int(in.WriteBack) ||
-		int64(in.OverMaxSize) <= in.MaxBytes || len(in.Shell) == 0 || in.ReadAheadSize <= 0 || in.ReadBlock <= 0 || in.MaxGets <= 0 {
+		int64(in.OverMaxSize) <= in.MaxBytes || len(in.Shell) == 0 || in.ReadAheadSize <= 0 || in.ReadBlock <= 0 || in.MaxGets <= 0 ||
+		in.EarlierBody == "" {
 		t.Fatal("object mount test input sizes do not fit the limits")
 	}
 	return in
@@ -338,6 +341,69 @@ func TestObjectMountModesAndReadAhead(t *testing.T) {
 	}
 }
 
+// TestObjectMountStopKeepsEarlierObjects proves the stop rule of a mount:
+// after Stopping, a close stores nothing, so a stream that a stopped
+// process left open is cut and the earlier object stays, and a new
+// unsynced file is not stored; a file synced before or after the stop is
+// stored; and the mount counts the dropped files.
+func TestObjectMountStopKeepsEarlierObjects(t *testing.T) {
+	in := readObjectMountTestInput(t)
+	upstream, dir, server := mountFake(t, in, false)
+	upstream.Put("state.bin", []byte(in.EarlierBody))
+	// Write-only opens, as a shell redirect makes: state.bin streams.
+	open := func(name string) *os.File {
+		f, err := os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	stream := open("state.bin")
+	if _, err := stream.Write(pattern(in.LargeSize, 6)); err != nil {
+		t.Fatal(err)
+	}
+	unsynced := open("unsynced.txt")
+	if _, err := unsynced.Write([]byte("unsynced")); err != nil {
+		t.Fatal(err)
+	}
+	syncedBefore := open("synced-before.txt")
+	if _, err := syncedBefore.Write([]byte("before")); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncedBefore.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	syncedAfter := open("synced-after.txt")
+	if _, err := syncedAfter.Write([]byte("after")); err != nil {
+		t.Fatal(err)
+	}
+
+	server.Stopping()
+	if err := syncedAfter.Sync(); err != nil {
+		t.Fatalf("fsync after the stop: %v", err)
+	}
+	for _, f := range []*os.File{stream, unsynced, syncedBefore, syncedAfter} {
+		_ = f.Close()
+	}
+	if err := server.Close(time.Second); err != nil {
+		t.Fatalf("close the mount: %v", err)
+	}
+	if got, _, _ := upstream.Object("state.bin"); string(got) != in.EarlierBody {
+		t.Errorf("state.bin = %d bytes, want the earlier object %q", len(got), in.EarlierBody)
+	}
+	if _, ok, _ := upstream.Object("unsynced.txt"); ok {
+		t.Error("an unsynced file of a stopped job was stored")
+	}
+	for name, want := range map[string]string{"synced-before.txt": "before", "synced-after.txt": "after"} {
+		if got, _, _ := upstream.Object(name); string(got) != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if got := server.Dropped(); got != 2 {
+		t.Errorf("dropped files = %d, want 2", got)
+	}
+}
+
 // TestObjectMountReadOnlyRefusesWrites proves that a read-only mount reads
 // and refuses each change.
 func TestObjectMountReadOnlyRefusesWrites(t *testing.T) {
@@ -346,6 +412,20 @@ func TestObjectMountReadOnlyRefusesWrites(t *testing.T) {
 	upstream.Put("kept.txt", []byte("kept"))
 	if got, err := os.ReadFile(filepath.Join(dir, "kept.txt")); err != nil || string(got) != "kept" {
 		t.Errorf("read on a read-only mount: %q, %v", got, err)
+	}
+	mounts, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readOnly := false
+	for _, line := range strings.Split(string(mounts), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 5 && fields[4] == dir {
+			readOnly = slices.Contains(strings.Split(fields[5], ","), "ro")
+		}
+	}
+	if !readOnly {
+		t.Error("the kernel lists the read-only mount as writable")
 	}
 	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("x"), 0o644); !errors.Is(err, syscall.EROFS) {
 		t.Errorf("write on a read-only mount = %v, want EROFS", err)

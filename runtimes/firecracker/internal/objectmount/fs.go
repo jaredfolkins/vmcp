@@ -3,6 +3,7 @@ package objectmount
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -30,6 +31,10 @@ type state struct {
 	// releases whose upload failed.
 	writers activity
 	failed  atomic.Int64
+	// stopping is set by Server.Stopping; dropped counts the files that a
+	// close did not store after it.
+	stopping atomic.Bool
+	dropped  atomic.Int64
 
 	mu sync.Mutex
 	// dirs are folders that mkdir made and that hold no object yet. The
@@ -300,6 +305,9 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 	}
 	return errno(d.st.c.remove(ctx, from))
 }
+
+// errStopped cuts an open stream of a stopped job.
+var errStopped = errors.New("object mount: the job stopped")
 
 // activity counts the open writers of a file or a mount and signals when
 // none remain.
@@ -806,10 +814,35 @@ func (h *streamHandle) commit(ctx context.Context) syscall.Errno {
 func (h *streamHandle) Flush(ctx context.Context) syscall.Errno {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.f.st.stopping.Load() {
+		return 0
+	}
 	if h.wb == nil && (h.f.st.process(ctx) != h.owner || h.written == 0) {
 		return 0
 	}
 	return h.commit(ctx)
+}
+
+// drop discards the unstored changes of a stopped job: it cuts an open
+// stream, so the upstream aborts it and keeps the earlier object, and
+// clears the buffers. The caller holds h.mu.
+func (h *streamHandle) drop() {
+	changed := h.dirty || h.pipe != nil
+	if h.pipe != nil {
+		_ = h.pipe.CloseWithError(errStopped)
+		<-h.done
+		h.pipe, h.ended, h.result = nil, true, 0
+	}
+	h.dirty = false
+	if h.wb != nil {
+		h.wb.mu.Lock()
+		changed = changed || h.wb.dirty
+		h.wb.dirty = false
+		h.wb.mu.Unlock()
+	}
+	if changed {
+		h.f.st.dropped.Add(1)
+	}
 }
 
 // Fsync stores a buffered file. A file that streams is stored when it is
@@ -828,6 +861,9 @@ func (h *streamHandle) Release(ctx context.Context) syscall.Errno {
 	defer h.mu.Unlock()
 	ctx, cancel := releaseContext(ctx)
 	defer cancel()
+	if h.f.st.stopping.Load() {
+		h.drop()
+	}
 	errno := h.commit(ctx)
 	if h.wb != nil {
 		h.wb.release()
@@ -954,13 +990,26 @@ func (w *writeBack) flush(ctx context.Context) syscall.Errno {
 	return 0
 }
 
-func (w *writeBack) Flush(ctx context.Context) syscall.Errno { return w.flush(ctx) }
+func (w *writeBack) Flush(ctx context.Context) syscall.Errno {
+	if w.f.st.stopping.Load() {
+		return 0
+	}
+	return w.flush(ctx)
+}
 
 func (w *writeBack) Fsync(ctx context.Context, _ uint32) syscall.Errno { return w.flush(ctx) }
 
 func (w *writeBack) Release(ctx context.Context) syscall.Errno {
 	ctx, cancel := releaseContext(ctx)
 	defer cancel()
+	if w.f.st.stopping.Load() {
+		w.mu.Lock()
+		if w.dirty {
+			w.dirty = false
+			w.f.st.dropped.Add(1)
+		}
+		w.mu.Unlock()
+	}
 	errno := w.flush(ctx)
 	w.release()
 	if w.writer {

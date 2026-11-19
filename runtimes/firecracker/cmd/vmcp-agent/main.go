@@ -88,6 +88,14 @@ func run(ev *events) (code int, export bool, err error) {
 	if err != nil {
 		return 0, false, err
 	}
+	// A stopped job keeps only the files that it synced: each mount cuts
+	// the uploads that a close would finish, so the upstream keeps the
+	// earlier object.
+	stop.whenStopped(func() {
+		for _, server := range mounts {
+			server.Stopping()
+		}
+	})
 	// Secret entries come last, so they replace a same-named entry.
 	cfg.Env = append(cfg.Env, secrets.Env...)
 	ev.send(agentproto.Message{Type: agentproto.TypeStep, Step: "start-process", Status: "running"})
@@ -99,6 +107,9 @@ func run(ev *events) (code int, export bool, err error) {
 	// The process has ended. Each mount stores the files that it closed.
 	for i, server := range mounts {
 		status, detail := "completed", ""
+		if dropped := server.Dropped(); dropped > 0 {
+			detail = fmt.Sprintf("%d files not stored after the stop", dropped)
+		}
 		if err := server.Close(agentproto.ObjectMountDrain); err != nil {
 			status, detail = "failed", err.Error()
 		}

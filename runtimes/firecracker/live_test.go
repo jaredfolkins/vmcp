@@ -761,7 +761,8 @@ func TestLiveFirecracker(t *testing.T) {
 	// through the upstream broker, which adds the token. A non-root process
 	// writes a small file, streams a large one, writes through a shell
 	// redirect with a child, keeps a chmod 600, reads the large file back
-	// with read-ahead, and reads a stored object; a read-only mount
+	// with read-ahead, and reads a stored object; a read-only mount is
+	// read-only in the kernel and
 	// refuses a write; each mount reports its close; and no event holds the
 	// token.
 	t.Run("object-mount", func(t *testing.T) {
@@ -781,6 +782,7 @@ func TestLiveFirecracker(t *testing.T) {
 			"wc -c < /data/large.bin",
 			"cat /ro/seed.txt",
 			"echo x > /ro/new.txt 2>/dev/null && echo RO_WRITTEN || echo RO_REFUSED",
+			"grep ' /ro ' /proc/mounts | cut -d' ' -f4 | cut -d, -f1",
 		}, "; ")
 		rec, res, _ := runLive(t, ctx, rt, "m-0b1ec70000000001", 8, api.MachineSpec{
 			Network: api.Network{Upstreams: []api.Upstream{
@@ -795,7 +797,7 @@ func TestLiveFirecracker(t *testing.T) {
 		if res.Exit == nil || res.Exit.Code != 0 {
 			t.Errorf("exit = %+v, want code 0; events: %s", res.Exit, rec.dump())
 		}
-		want := fmt.Sprintf("a\nchild\nb\n600\n%d\nseed\nRO_REFUSED\n", c.ObjectMountLargeBytes)
+		want := fmt.Sprintf("a\nchild\nb\n600\n%d\nseed\nRO_REFUSED\nro\n", c.ObjectMountLargeBytes)
 		if out := rec.output(api.EventStdout); out != want {
 			t.Errorf("stdout = %q, want %q; stderr %q", out, want, rec.output(api.EventStderr))
 		}
@@ -835,6 +837,83 @@ func TestLiveFirecracker(t *testing.T) {
 		}
 		checkProof(t, rt, res)
 	})
+	// A stop or a guest kill while a stream is open: the upload is cut, so
+	// the earlier object stays, and a file closed before it is stored. After
+	// a stop, the mount reports the file that it did not store.
+	for i, end := range []string{"stop", "kill"} {
+		t.Run("object-mount-"+end, func(t *testing.T) {
+			store := objectmounttest.New("/root", c.ObjectMountToken)
+			store.Put("state.bin", []byte("earlier\n"))
+			srv := httptest.NewServer(store)
+			defer srv.Close()
+			id := fmt.Sprintf("m-0b1ec7000000001%d", i)
+			dir := filepath.Join(rt.machinesDir(), id)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			script := fmt.Sprintf("echo closed > /data/closed.txt; echo streaming; (head -c %d /dev/zero; sleep 120) > /data/state.bin",
+				c.ObjectMountLargeBytes)
+			spec := api.MachineSpec{
+				Resources: api.Resources{VCPUs: 1, MemoryMiB: 256, DiskMiB: 256},
+				Network: api.Network{Upstreams: []api.Upstream{
+					{Name: "store", URL: srv.URL, Token: c.ObjectMountToken, AllowWrite: true},
+				}},
+				Mounts:  []api.Mount{{GuestPath: "/data", Upstream: "store", Path: "/root", MaxBytes: 1 << 30, Uploads: 2}},
+				Process: api.Process{Args: []string{"/bin/sh", "-c", script}},
+			}
+			rec := &recorder{}
+			inst, err := rt.Provision(ctx, machine.Launch{ID: id, Slot: 9 + i, Dir: dir, ImageID: "img-live", Spec: spec,
+				Args: spec.Process.Args, Env: []string{"PATH=/bin:/usr/bin"}, WorkDir: "/", Sink: rec})
+			if err != nil {
+				t.Fatalf("Provision() error = %v", err)
+			}
+			m := inst.(*Machine)
+			t.Cleanup(func() { m.Destroy(context.Background(), "test-cleanup") })
+			if err := m.Boot(ctx); err != nil {
+				t.Fatalf("Boot() error = %v", err)
+			}
+			deadline := time.Now().Add(time.Minute)
+			for !strings.Contains(rec.output(api.EventStdout), "streaming") {
+				if time.Now().After(deadline) {
+					t.Fatalf("the stream did not start in one minute; events: %s", rec.dump())
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			// head has sent its bytes; the stream stays open in the sleep.
+			time.Sleep(3 * time.Second)
+			if end == "stop" {
+				m.Stop("test-stop", 5*time.Second)
+			} else {
+				m.Kill("test-kill")
+			}
+			select {
+			case <-m.Done():
+			case <-time.After(2 * time.Minute):
+				t.Fatalf("the machine did not end after the %s; events: %s", end, rec.dump())
+			}
+			if got, _, _ := store.Object("state.bin"); string(got) != "earlier\n" {
+				t.Errorf("state.bin after the %s = %d bytes, want the earlier object", end, len(got))
+			}
+			if got, _, _ := store.Object("closed.txt"); string(got) != "closed\n" {
+				t.Errorf("closed.txt = %q, want the file closed before the %s", got, end)
+			}
+			if end == "stop" {
+				reported := false
+				rec.mu.Lock()
+				for _, ev := range rec.events {
+					if ev.Kind == api.EventStep && ev.Step == "object-mount /data" && strings.Contains(ev.Detail, "not stored after the stop") {
+						reported = true
+					}
+				}
+				rec.mu.Unlock()
+				if !reported {
+					t.Errorf("no mount step reports the dropped file; events: %s", rec.dump())
+				}
+			}
+			checkProof(t, rt, m.Result())
+		})
+	}
 	// The gateway broker on a real guest: direct TCP to HTTP and SSH ports
 	// and direct UDP DNS reach public hosts with no proxy; metadata,
 	// private, and host-port destinations stay denied; the broker DNS still

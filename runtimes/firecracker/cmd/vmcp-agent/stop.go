@@ -62,6 +62,21 @@ type stopper struct {
 	ended     bool
 	requested bool
 	grace     time.Duration
+	// onStop runs once at the first stop request, before the signal.
+	onStop []func()
+}
+
+// whenStopped runs fn at the first stop request, or now when one came.
+func (s *stopper) whenStopped(fn func()) {
+	s.mu.Lock()
+	requested := s.requested
+	if !requested {
+		s.onStop = append(s.onStop, fn)
+	}
+	s.mu.Unlock()
+	if requested {
+		fn()
+	}
 }
 
 // request records the first stop request and signals a running process.
@@ -73,7 +88,12 @@ func (s *stopper) request(grace time.Duration) {
 	}
 	s.requested, s.grace = true, grace
 	pid, ended := s.pid, s.ended
+	onStop := s.onStop
+	s.onStop = nil
 	s.mu.Unlock()
+	for _, fn := range onStop {
+		fn()
+	}
 	if pid > 0 && !ended {
 		s.signal(pid, grace)
 	}

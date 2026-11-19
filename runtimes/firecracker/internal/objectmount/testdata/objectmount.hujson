@@ -16,6 +16,9 @@
   "read_ahead_size": 4194304,
   "read_block": 4096,
   "max_gets": 2,
+  // A stopped job: the body of an earlier object that a cut stream must
+  // keep.
+  "earlier_body": "earlier state\n",
   // A file over max_bytes fails and leaves no object.
   "over_max_size": 1100000,
   // Waits past the one-second entry timeout of the kernel, so a lookup

@@ -82,6 +82,26 @@ func (u *Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// A PUT body is read before the lock, so an open stream does not block
+	// the other requests.
+	var body []byte
+	var bodyErr error
+	if r.Method == http.MethodPut {
+		limit := r.ContentLength
+		if limit < 0 {
+			parsed, err := strconv.ParseInt(r.Header.Get(api.ObjectMountMaxBytesHeader), 10, 64)
+			if err != nil {
+				w.WriteHeader(http.StatusLengthRequired)
+				return
+			}
+			limit = parsed
+		}
+		body, bodyErr = io.ReadAll(io.LimitReader(r.Body, limit+1))
+		if bodyErr != nil || int64(len(body)) > limit {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			return
+		}
+	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	switch {
@@ -127,21 +147,7 @@ func (u *Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		_, _ = w.Write(data)
 	case r.Method == http.MethodPut:
-		limit := r.ContentLength
-		if limit < 0 {
-			parsed, err := strconv.ParseInt(r.Header.Get(api.ObjectMountMaxBytesHeader), 10, 64)
-			if err != nil {
-				w.WriteHeader(http.StatusLengthRequired)
-				return
-			}
-			limit = parsed
-		}
-		data, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
-		if err != nil || int64(len(data)) > limit {
-			w.WriteHeader(http.StatusRequestEntityTooLarge)
-			return
-		}
-		u.objects[rel] = data
+		u.objects[rel] = body
 		u.modified[rel] = time.Now()
 		u.chunked[rel] = r.ContentLength < 0
 		u.modes[rel] = r.Header.Get(api.ObjectMountModeHeader)
