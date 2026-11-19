@@ -180,11 +180,17 @@ type Drive struct {
 //
 //	GET    <folder>/?list[&token=<next>]  200 {"entries":[{"name","folder","size","modified"}],"next":"<token>"}
 //	                                      names are relative to the folder; a folder name ends with "/"
-//	HEAD   <file>                         200 with Content-Length and Last-Modified, or 404
+//	HEAD   <file>                         200 with Content-Length, Last-Modified, and
+//	                                      ObjectMountModeHeader, or 404
 //	GET    <file>                         200, or 206 for one "Range: bytes=first-last", 416 past the end, 404
 //	PUT    <file>                         201; the body has a Content-Length, or it is chunked and
-//	                                      ObjectMountMaxBytesHeader declares its largest size
+//	                                      ObjectMountMaxBytesHeader declares its largest size;
+//	                                      ObjectMountModeHeader may name its mode
+//	PATCH  <file>                         204; ObjectMountModeHeader names the new mode; 404
 //	DELETE <file>                         204, or 404
+//
+// A mode is the octal permission bits, such as "0644". The upstream may
+// keep a coarser set of modes; HEAD answers the mode that it keeps.
 //
 // A write becomes visible only when its whole body is stored. 413 refuses a
 // body that is too large, 429 a write while the upstream is busy, and 401 a
@@ -211,6 +217,10 @@ type Mount struct {
 // ObjectMountMaxBytesHeader declares the largest size of a chunked object
 // mount write.
 const ObjectMountMaxBytesHeader = "Object-Max-Bytes"
+
+// ObjectMountModeHeader carries the octal permission bits of an object
+// mount file.
+const ObjectMountModeHeader = "Object-Mode"
 
 // File is one read-only file that vmcp writes into the guest. vmcp clears
 // a secret body after use and never returns it.

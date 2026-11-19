@@ -11,6 +11,11 @@
   "large_size": 200000,
   // A read-write file larger than write_back fails with EFBIG.
   "over_budget_size": 70000,
+  // A sequential read of this many bytes with read_block reads must send at
+  // most max_gets GET requests (read-ahead).
+  "read_ahead_size": 4194304,
+  "read_block": 4096,
+  "max_gets": 2,
   // A file over max_bytes fails and leaves no object.
   "over_max_size": 1100000,
   // Waits past the one-second entry timeout of the kernel, so a lookup

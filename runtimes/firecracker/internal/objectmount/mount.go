@@ -31,8 +31,9 @@ type Options struct {
 	// URL is the upstream URL of the mount root.
 	URL      string
 	ReadOnly bool
-	// WriteBack is the byte budget of the write-back buffers.
-	WriteBack int64
+	// WriteBack is the byte budget of the write-back buffers; mounts may
+	// share one.
+	WriteBack *Budget
 	// MaxBytes is the declared largest size of a streamed upload.
 	MaxBytes int64
 	// Uploads is the number of concurrent uploads.
@@ -82,8 +83,8 @@ func (s *Server) Close(wait time.Duration) error {
 
 // Mount serves the mount at dir until Close.
 func Mount(dir string, opt Options) (*Server, error) {
-	if opt.URL == "" || opt.MaxBytes <= 0 || opt.Uploads <= 0 || opt.SmallFile <= 0 {
-		return nil, errors.New("object mount: URL, MaxBytes, Uploads, and SmallFile are required")
+	if opt.URL == "" || opt.WriteBack == nil || opt.MaxBytes <= 0 || opt.Uploads <= 0 || opt.SmallFile <= 0 {
+		return nil, errors.New("object mount: URL, WriteBack, MaxBytes, Uploads, and SmallFile are required")
 	}
 	transport := opt.Transport
 	if transport == nil {
@@ -93,7 +94,7 @@ func Mount(dir string, opt Options) (*Server, error) {
 		c:         newClient(opt.URL, opt.MaxBytes, opt.Uploads, transport),
 		readOnly:  opt.ReadOnly,
 		smallFile: opt.SmallFile,
-		budget:    &budget{limit: opt.WriteBack},
+		budget:    opt.WriteBack,
 		proc:      opt.Proc,
 		dirs:      map[string]bool{},
 	}

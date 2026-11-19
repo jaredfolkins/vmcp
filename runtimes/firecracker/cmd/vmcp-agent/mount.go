@@ -16,7 +16,7 @@ import (
 const objectSmallFile = 1 << 20
 
 // mountObjects serves each object mount in the guest root. One quarter of
-// the guest memory is the write-back budget, shared by the mounts.
+// the guest memory is one write-back budget, shared by the mounts.
 func mountObjects(mounts []agentproto.Mount) ([]*objectmount.Server, error) {
 	if len(mounts) == 0 {
 		return nil, nil
@@ -25,7 +25,7 @@ func mountObjects(mounts []agentproto.Mount) ([]*objectmount.Server, error) {
 	if err := unix.Sysinfo(&info); err != nil {
 		return nil, fmt.Errorf("read guest memory: %w", err)
 	}
-	budget := int64(info.Totalram) * int64(info.Unit) / 4 / int64(len(mounts))
+	budget := objectmount.NewBudget(int64(info.Totalram) * int64(info.Unit) / 4)
 	var servers []*objectmount.Server
 	for _, m := range mounts {
 		target, err := guestPath(m.GuestPath)

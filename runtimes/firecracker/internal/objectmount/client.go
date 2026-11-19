@@ -24,10 +24,30 @@ const uploadWait = 60 * time.Second
 // releaseWait bounds the upload of a file after its last close.
 const releaseWait = 5 * time.Minute
 
-// attr is the size and change time of one file.
+// readAhead is the least number of bytes that one read request fetches.
+const readAhead = 4 << 20
+
+// defaultMode is the mode of a file whose upstream names none.
+const defaultMode = 0o644
+
+// attr is the size, change time, and permission bits of one file.
 type attr struct {
 	size     int64
 	modified time.Time
+	mode     uint32
+}
+
+// parseMode reads an ObjectMountModeHeader value.
+func parseMode(value string) uint32 {
+	mode, err := strconv.ParseUint(value, 8, 32)
+	if err != nil || mode == 0 || mode > 0o777 {
+		return defaultMode
+	}
+	return uint32(mode)
+}
+
+func formatMode(mode uint32) string {
+	return fmt.Sprintf("%04o", mode&0o777)
 }
 
 // entry is one entry of a folder listing.
@@ -134,7 +154,7 @@ func (c *client) head(ctx context.Context, rel string) (attr, error) {
 		return attr{}, syscall.EIO
 	}
 	modified, _ := http.ParseTime(resp.Header.Get("Last-Modified"))
-	return attr{size: size, modified: modified}, nil
+	return attr{size: size, modified: modified, mode: parseMode(resp.Header.Get(api.ObjectMountModeHeader))}, nil
 }
 
 // list returns every entry of a folder; "" is the mount root.
@@ -226,14 +246,15 @@ func (c *client) acquire(ctx context.Context) error {
 
 func (c *client) releaseSlot() { <-c.uploads }
 
-// put writes a whole file. size is its exact length, or -1 for a chunked
-// body of at most maxBytes. The caller holds an upload slot.
-func (c *client) put(ctx context.Context, rel string, body io.Reader, size int64) error {
+// put writes a whole file with its mode. size is its exact length, or -1
+// for a chunked body of at most maxBytes. The caller holds an upload slot.
+func (c *client) put(ctx context.Context, rel string, body io.Reader, size int64, mode uint32) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.url(rel, false, ""), body)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set(api.ObjectMountModeHeader, formatMode(mode))
 	if size >= 0 {
 		req.ContentLength = size
 		if size == 0 {
@@ -249,6 +270,20 @@ func (c *client) put(ctx context.Context, rel string, body io.Reader, size int64
 	}
 	drain(resp)
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return statusErrno(resp.StatusCode)
+	}
+	return nil
+}
+
+// chmod changes the mode of a stored file.
+func (c *client) chmod(ctx context.Context, rel string, mode uint32) error {
+	resp, err := c.do(ctx, http.MethodPatch, c.url(rel, false, ""), nil,
+		http.Header{api.ObjectMountModeHeader: {formatMode(mode)}})
+	if err != nil {
+		return err
+	}
+	drain(resp)
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		return statusErrno(resp.StatusCode)
 	}
 	return nil

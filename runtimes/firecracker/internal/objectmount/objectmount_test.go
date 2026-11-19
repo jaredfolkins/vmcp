@@ -33,6 +33,9 @@ type objectMountTestInput struct {
 	LargeSize      int   `json:"large_size"`
 	OverBudgetSize int   `json:"over_budget_size"`
 	OverMaxSize    int   `json:"over_max_size"`
+	ReadAheadSize  int   `json:"read_ahead_size"`
+	ReadBlock      int   `json:"read_block"`
+	MaxGets        int   `json:"max_gets"`
 	EntryWaitMS    int   `json:"entry_wait_ms"`
 	Shell          []struct {
 		Name       string `json:"name"`
@@ -59,7 +62,7 @@ func readObjectMountTestInput(t *testing.T) objectMountTestInput {
 		t.Fatal(err)
 	}
 	if in.SmallSize > in.SmallFile || in.LargeSize <= in.SmallFile || in.OverBudgetSize <= int(in.WriteBack) ||
-		int64(in.OverMaxSize) <= in.MaxBytes || len(in.Shell) == 0 {
+		int64(in.OverMaxSize) <= in.MaxBytes || len(in.Shell) == 0 || in.ReadAheadSize <= 0 || in.ReadBlock <= 0 || in.MaxGets <= 0 {
 		t.Fatal("object mount test input sizes do not fit the limits")
 	}
 	return in
@@ -80,7 +83,7 @@ func mountFake(t *testing.T, in objectMountTestInput, readOnly bool) (*objectmou
 	t.Cleanup(srv.Close)
 	dir := t.TempDir()
 	server, err := Mount(dir, Options{
-		URL: srv.URL + "/root", ReadOnly: readOnly, WriteBack: in.WriteBack, MaxBytes: in.MaxBytes,
+		URL: srv.URL + "/root", ReadOnly: readOnly, WriteBack: NewBudget(in.WriteBack), MaxBytes: in.MaxBytes,
 		Uploads: in.Uploads, SmallFile: in.SmallFile,
 	})
 	if err != nil {
@@ -273,6 +276,65 @@ func TestObjectMountShellWrites(t *testing.T) {
 	}
 	if err := server.Close(time.Second); err == nil || !strings.Contains(err.Error(), "1 uploads failed") {
 		t.Errorf("close the mount = %v, want the one failed upload", err)
+	}
+}
+
+// TestObjectMountModesAndReadAhead proves that a file keeps the mode of its
+// create and of a later chmod through the mode header, that a rename keeps
+// the mode, and that a sequential read fetches ahead, so it sends few GET
+// requests.
+func TestObjectMountModesAndReadAhead(t *testing.T) {
+	in := readObjectMountTestInput(t)
+	upstream, dir, server := mountFake(t, in, false)
+	key := filepath.Join(dir, "key")
+	if err := os.WriteFile(key, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := upstream.Mode("key"); got != "0600" {
+		t.Errorf("stored mode of a file created with 0600 = %q", got)
+	}
+	if err := os.Chmod(key, 0o755); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	if got := upstream.Mode("key"); got != "0755" {
+		t.Errorf("stored mode after chmod 0755 = %q", got)
+	}
+	time.Sleep(time.Duration(in.EntryWaitMS) * time.Millisecond)
+	if info, err := os.Stat(key); err != nil || info.Mode().Perm() != 0o755 {
+		t.Errorf("stat after the entry timeout = %v, %v; want mode 0755", info, err)
+	}
+	if err := os.Rename(key, filepath.Join(dir, "moved-key")); err != nil {
+		t.Fatal(err)
+	}
+	if got := upstream.Mode("moved-key"); got != "0755" {
+		t.Errorf("mode after a rename = %q, want 0755", got)
+	}
+
+	data := pattern(in.ReadAheadSize, 7)
+	upstream.Put("big.bin", data)
+	before := upstream.Gets()
+	file, err := os.Open(filepath.Join(dir, "big.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []byte
+	block := make([]byte, in.ReadBlock)
+	for {
+		n, err := file.Read(block)
+		got = append(got, block[:n]...)
+		if err != nil {
+			break
+		}
+	}
+	_ = file.Close()
+	if !bytes.Equal(got, data) {
+		t.Errorf("sequential read returned %d bytes, want the %d stored", len(got), len(data))
+	}
+	if gets := upstream.Gets() - before; gets > in.MaxGets {
+		t.Errorf("a sequential read of %d bytes sent %d GET requests, want at most %d", in.ReadAheadSize, gets, in.MaxGets)
+	}
+	if err := server.Close(time.Second); err != nil {
+		t.Errorf("close the mount: %v", err)
 	}
 }
 

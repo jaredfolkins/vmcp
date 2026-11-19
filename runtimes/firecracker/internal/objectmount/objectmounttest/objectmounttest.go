@@ -26,11 +26,14 @@ type Upstream struct {
 	objects  map[string][]byte
 	modified map[string]time.Time
 	chunked  map[string]bool
+	modes    map[string]string
+	gets     int
 }
 
 // New returns an empty upstream.
 func New(prefix, token string) *Upstream {
-	return &Upstream{Prefix: prefix, Token: token, objects: map[string][]byte{}, modified: map[string]time.Time{}, chunked: map[string]bool{}}
+	return &Upstream{Prefix: prefix, Token: token, objects: map[string][]byte{}, modified: map[string]time.Time{},
+		chunked: map[string]bool{}, modes: map[string]string{}}
 }
 
 // Put stores an object.
@@ -39,6 +42,20 @@ func (u *Upstream) Put(rel string, data []byte) {
 	defer u.mu.Unlock()
 	u.objects[rel] = data
 	u.modified[rel] = time.Now()
+}
+
+// Mode returns the stored mode header value of an object.
+func (u *Upstream) Mode(rel string) string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.modes[rel]
+}
+
+// Gets returns the number of GET requests for objects.
+func (u *Upstream) Gets() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.gets
 }
 
 // Object returns an object and whether its write was chunked.
@@ -78,7 +95,18 @@ func (u *Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		w.Header().Set("Last-Modified", u.modified[rel].UTC().Format(http.TimeFormat))
+		if mode := u.modes[rel]; mode != "" {
+			w.Header().Set(api.ObjectMountModeHeader, mode)
+		}
+	case r.Method == http.MethodPatch:
+		if _, ok := u.objects[rel]; !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		u.modes[rel] = r.Header.Get(api.ObjectMountModeHeader)
+		w.WriteHeader(http.StatusNoContent)
 	case r.Method == http.MethodGet:
+		u.gets++
 		data, ok := u.objects[rel]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
@@ -116,6 +144,7 @@ func (u *Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		u.objects[rel] = data
 		u.modified[rel] = time.Now()
 		u.chunked[rel] = r.ContentLength < 0
+		u.modes[rel] = r.Header.Get(api.ObjectMountModeHeader)
 		w.WriteHeader(http.StatusCreated)
 	case r.Method == http.MethodDelete:
 		if _, ok := u.objects[rel]; !ok {

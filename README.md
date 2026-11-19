@@ -201,8 +201,10 @@ the object mount protocol of `api.Mount`. The guest agent serves it with
 FUSE: each file operation becomes an HTTP request through the upstream
 broker, which adds the upstream token, so no file byte is stored on a guest
 or host disk. A write-only open streams in order as one upload; every other
-write uses a write-back buffer within one quarter of the guest memory. A
-file is stored when its last descriptor closes. A writable mount needs an
+write uses a write-back buffer within one quarter of the guest memory,
+shared by the mounts. A file is stored when its last descriptor closes, and
+it keeps its permission bits through the mode header. A read fetches at
+least 4 MiB per request. A writable mount needs an
 upstream with `allow_write`; `read_only` refuses writes. After the process
 exits, the agent waits up to 60 seconds for the last uploads and reports
 each mount as an `object-mount <path>` step.

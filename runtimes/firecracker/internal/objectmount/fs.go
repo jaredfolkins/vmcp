@@ -22,7 +22,7 @@ type state struct {
 	c         *client
 	readOnly  bool
 	smallFile int
-	budget    *budget
+	budget    *Budget
 	// proc is the proc file system of the processes that use the mount.
 	proc string
 
@@ -53,14 +53,15 @@ func (s *state) setDir(rel string, made bool) {
 	}
 }
 
-// budget bounds the bytes that write-back handles hold in guest memory.
-type budget struct {
+// Budget bounds the bytes that write-back handles hold in guest memory. One
+// Budget can serve all mounts of a guest.
+type Budget struct {
 	mu    sync.Mutex
 	limit int64
 	used  int64
 }
 
-func (b *budget) reserve(n int64) bool {
+func (b *Budget) reserve(n int64) bool {
 	if n <= 0 {
 		return true
 	}
@@ -73,7 +74,7 @@ func (b *budget) reserve(n int64) bool {
 	return true
 }
 
-func (b *budget) release(n int64) {
+func (b *Budget) release(n int64) {
 	if n <= 0 {
 		return
 	}
@@ -93,10 +94,7 @@ func nodePath(n *fs.Inode) string {
 	return strings.Trim(n.Path(n.Root()), "/")
 }
 
-const (
-	dirMode  = syscall.S_IFDIR | 0o755
-	fileMode = syscall.S_IFREG | 0o644
-)
+const dirMode = syscall.S_IFDIR | 0o755
 
 type dirNode struct {
 	fs.Inode
@@ -133,7 +131,10 @@ func (d *dirNode) Statfs(_ context.Context, out *fuse.StatfsOut) syscall.Errno {
 }
 
 func (d *dirNode) newFile(ctx context.Context, a attr) *fs.Inode {
-	return d.NewInode(ctx, &fileNode{st: d.st, size: a.size, modified: a.modified}, fs.StableAttr{Mode: syscall.S_IFREG})
+	if a.mode == 0 {
+		a.mode = defaultMode
+	}
+	return d.NewInode(ctx, &fileNode{st: d.st, size: a.size, modified: a.modified, mode: a.mode}, fs.StableAttr{Mode: syscall.S_IFREG})
 }
 
 func (d *dirNode) newDir(ctx context.Context) *fs.Inode {
@@ -151,7 +152,7 @@ func (d *dirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (
 	}
 	a, err := d.st.c.head(ctx, rel)
 	if err == nil {
-		out.Mode = fileMode
+		out.Mode = syscall.S_IFREG | a.mode
 		out.Size = uint64(a.size)
 		out.SetTimes(nil, &a.modified, &a.modified)
 		return d.newFile(ctx, a), 0
@@ -207,17 +208,17 @@ func (d *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	return fs.NewListDirStream(out), 0
 }
 
-func (d *dirNode) Create(ctx context.Context, name string, flags, _ uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
+func (d *dirNode) Create(ctx context.Context, name string, flags, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
 	if d.st.readOnly {
 		return nil, nil, 0, syscall.EROFS
 	}
-	child := d.newFile(ctx, attr{modified: time.Now()})
+	child := d.newFile(ctx, attr{modified: time.Now(), mode: mode & 0o777})
 	file := child.Operations().(*fileNode)
 	handle, errno := file.writeHandle(ctx, join(nodePath(&d.Inode), name), flags|syscall.O_TRUNC)
 	if errno != 0 {
 		return nil, nil, 0, errno
 	}
-	out.Mode = fileMode
+	out.Mode = syscall.S_IFREG | file.permissions()
 	return child, handle, 0, 0
 }
 
@@ -277,18 +278,22 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 		d.st.setDir(to, true)
 		return 0
 	}
+	source, err := d.st.c.head(ctx, from)
+	if errno(err) == syscall.ENOENT {
+		return syscall.EXDEV
+	}
+	if err != nil {
+		return errno(err)
+	}
 	body, size, err := d.st.c.open(ctx, from)
 	if err != nil {
-		if errno(err) == syscall.ENOENT {
-			return syscall.EXDEV
-		}
 		return errno(err)
 	}
 	defer func() { _ = body.Close() }()
 	if err := d.st.c.acquire(ctx); err != nil {
 		return errno(err)
 	}
-	err = d.st.c.put(ctx, to, body, size)
+	err = d.st.c.put(ctx, to, body, size, source.mode)
 	d.st.c.releaseSlot()
 	if err != nil {
 		return errno(err)
@@ -385,7 +390,9 @@ type fileNode struct {
 	mu       sync.Mutex
 	size     int64
 	modified time.Time
-	writers  activity
+	// mode is the permission bits that the next upload stores.
+	mode    uint32
+	writers activity
 	// pending is the latest write-only handle that has not changed the
 	// file. The kernel sends the truncate of an open with O_TRUNC without
 	// a handle, so it goes to this one.
@@ -443,10 +450,16 @@ func (f *fileNode) setSize(size int64) {
 	f.modified = time.Now()
 }
 
+func (f *fileNode) permissions() uint32 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mode
+}
+
 func (f *fileNode) fillEntry(out *fuse.EntryOut) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out.Mode = fileMode
+	out.Mode = syscall.S_IFREG | f.mode
 	out.Size = uint64(f.size)
 	out.SetTimes(nil, &f.modified, &f.modified)
 }
@@ -454,7 +467,7 @@ func (f *fileNode) fillEntry(out *fuse.EntryOut) {
 func (f *fileNode) fill(out *fuse.AttrOut) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out.Mode = fileMode
+	out.Mode = syscall.S_IFREG | f.mode
 	out.Size = uint64(f.size)
 	out.SetTimes(nil, &f.modified, &f.modified)
 }
@@ -464,9 +477,23 @@ func (f *fileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 	return 0
 }
 
-// Setattr changes only the size; the protocol keeps no mode, owner, or
-// times, so those changes succeed without effect.
+// Setattr changes the size and the mode. A mode change is a PATCH of the
+// stored file; a file that is not stored yet takes the mode with its
+// upload, as every upload reads the mode when it starts. The protocol keeps
+// no owner or times, so those changes succeed without effect.
 func (f *fileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	if mode, ok := in.GetMode(); ok {
+		if f.st.readOnly {
+			return syscall.EROFS
+		}
+		f.mu.Lock()
+		f.mode = mode & 0o777
+		f.mu.Unlock()
+		err := f.st.c.chmod(ctx, nodePath(&f.Inode), mode&0o777)
+		if err != nil && (errno(err) != syscall.ENOENT || !f.writing()) {
+			return errno(err)
+		}
+	}
 	if size, ok := in.GetSize(); ok {
 		if f.st.readOnly {
 			return syscall.EROFS
@@ -509,7 +536,7 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 			return nil, 0, errno(err)
 		}
 		f.mu.Lock()
-		f.size, f.modified = a.size, a.modified
+		f.size, f.modified, f.mode = a.size, a.modified, a.mode
 		f.mu.Unlock()
 		return &readHandle{st: f.st, rel: rel}, 0, 0
 	}
@@ -553,19 +580,41 @@ type truncater interface {
 	truncate(ctx context.Context, size int64) syscall.Errno
 }
 
+// readHandle reads a stored file. It fetches at least readAhead bytes per
+// request and serves the following reads from them, so a sequential read
+// sends one request for each readAhead bytes, not one for each kernel read.
 type readHandle struct {
 	st  *state
 	rel string
+
+	mu sync.Mutex
+	// buf holds the bytes of the file from off; a buf shorter than its
+	// request ends at the end of the file.
+	off       int64
+	buf       []byte
+	requested int
 }
 
 var _ fs.FileReader = (*readHandle)(nil)
 
 func (h *readHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	data, err := h.st.c.read(ctx, h.rel, off, len(dest))
-	if err != nil {
-		return nil, errno(err)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	end := off + int64(len(dest))
+	atEOF := len(h.buf) < h.requested
+	if h.buf == nil || off < h.off || (end > h.off+int64(len(h.buf)) && !atEOF) {
+		n := max(len(dest), readAhead)
+		data, err := h.st.c.read(ctx, h.rel, off, n)
+		if err != nil {
+			return nil, errno(err)
+		}
+		h.off, h.buf, h.requested = off, data, n
 	}
-	return fuse.ReadResultData(data), 0
+	start := off - h.off
+	if start >= int64(len(h.buf)) {
+		return fuse.ReadResultData(nil), 0
+	}
+	return fuse.ReadResultData(h.buf[start:min(int64(len(h.buf)), end-h.off)]), 0
 }
 
 // streamHandle writes a file in order from its start. It keeps the first
@@ -667,7 +716,7 @@ func (h *streamHandle) start(ctx context.Context) syscall.Errno {
 	reader, writer := io.Pipe()
 	h.pipe, h.done = writer, make(chan error, 1)
 	go func() {
-		err := c.put(context.Background(), h.rel, reader, -1)
+		err := c.put(context.Background(), h.rel, reader, -1, h.f.permissions())
 		_ = reader.CloseWithError(err)
 		c.releaseSlot()
 		h.done <- err
@@ -745,7 +794,7 @@ func (h *streamHandle) commit(ctx context.Context) syscall.Errno {
 	if err := c.acquire(ctx); err != nil {
 		return errno(err)
 	}
-	err := c.put(ctx, h.rel, bytes.NewReader(h.buf), int64(len(h.buf)))
+	err := c.put(ctx, h.rel, bytes.NewReader(h.buf), int64(len(h.buf)), h.f.permissions())
 	c.releaseSlot()
 	if err != nil {
 		return errno(err)
@@ -896,7 +945,7 @@ func (w *writeBack) flush(ctx context.Context) syscall.Errno {
 	if err := c.acquire(ctx); err != nil {
 		return errno(err)
 	}
-	err := c.put(ctx, w.rel, bytes.NewReader(w.data), int64(len(w.data)))
+	err := c.put(ctx, w.rel, bytes.NewReader(w.data), int64(len(w.data)), w.f.permissions())
 	c.releaseSlot()
 	if err != nil {
 		return errno(err)
@@ -927,3 +976,6 @@ func (w *writeBack) release() {
 	w.reserved = 0
 	w.data = nil
 }
+
+// NewBudget returns a write-back budget of limit bytes.
+func NewBudget(limit int64) *Budget { return &Budget{limit: limit} }

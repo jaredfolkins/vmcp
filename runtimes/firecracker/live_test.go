@@ -760,7 +760,8 @@ func TestLiveFirecracker(t *testing.T) {
 	// Object mounts on a real guest: the agent serves each mount with FUSE
 	// through the upstream broker, which adds the token. A non-root process
 	// writes a small file, streams a large one, writes through a shell
-	// redirect with a child, and reads a stored object; a read-only mount
+	// redirect with a child, keeps a chmod 600, reads the large file back
+	// with read-ahead, and reads a stored object; a read-only mount
 	// refuses a write; each mount reports its close; and no event holds the
 	// token.
 	t.Run("object-mount", func(t *testing.T) {
@@ -776,6 +777,7 @@ func TestLiveFirecracker(t *testing.T) {
 			fmt.Sprintf("head -c %d /dev/zero > /data/large.bin", c.ObjectMountLargeBytes),
 			"{ echo a; sh -c 'echo child'; echo b; } > /data/r.txt",
 			"cat /data/r.txt",
+			"echo k > /data/key; chmod 600 /data/key; stat -c %a /data/key",
 			"wc -c < /data/large.bin",
 			"cat /ro/seed.txt",
 			"echo x > /ro/new.txt 2>/dev/null && echo RO_WRITTEN || echo RO_REFUSED",
@@ -793,7 +795,7 @@ func TestLiveFirecracker(t *testing.T) {
 		if res.Exit == nil || res.Exit.Code != 0 {
 			t.Errorf("exit = %+v, want code 0; events: %s", res.Exit, rec.dump())
 		}
-		want := fmt.Sprintf("a\nchild\nb\n%d\nseed\nRO_REFUSED\n", c.ObjectMountLargeBytes)
+		want := fmt.Sprintf("a\nchild\nb\n600\n%d\nseed\nRO_REFUSED\n", c.ObjectMountLargeBytes)
 		if out := rec.output(api.EventStdout); out != want {
 			t.Errorf("stdout = %q, want %q; stderr %q", out, want, rec.output(api.EventStderr))
 		}
@@ -805,6 +807,14 @@ func TestLiveFirecracker(t *testing.T) {
 		}
 		if _, ok, _ := store.Object("new.txt"); ok {
 			t.Error("the read-only mount stored a file")
+		}
+		if got := store.Mode("key"); got != "0600" {
+			t.Errorf("stored mode of key = %q, want 0600", got)
+		}
+		// The read of large.bin fetches 4 MiB per request; seed.txt and the
+		// other reads add a few.
+		if maxGets := c.ObjectMountLargeBytes/(4<<20) + 6; store.Gets() > maxGets {
+			t.Errorf("%d GET requests, want at most %d with read-ahead", store.Gets(), maxGets)
 		}
 		closed := 0
 		rec.mu.Lock()
