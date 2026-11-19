@@ -1,0 +1,21 @@
+{
+  // Object mount validation at the create route. The spec has the
+  // upstreams below; each case adds one mount.
+  "upstreams": [
+    {"name": "storage", "url": "http://storage.internal:5362/job-storage", "token": "test-token", "allow_write": true},
+    {"name": "reader", "url": "http://reader.internal:8080", "token": "test-token"}
+  ],
+  "cases": [
+    {"name": "writable mount", "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "/public", "max_bytes": 1073741824, "uploads": 2}, "valid": true},
+    {"name": "read-only mount of a read upstream", "mount": {"guest_path": "/lemc/cache", "upstream": "reader", "path": "/cache", "read_only": true, "max_bytes": 1, "uploads": 1}, "valid": true},
+    {"name": "writable mount of a read upstream", "mount": {"guest_path": "/lemc/cache", "upstream": "reader", "path": "/cache", "max_bytes": 1, "uploads": 1}, "valid": false},
+    {"name": "unknown upstream", "mount": {"guest_path": "/lemc/public", "upstream": "other", "path": "/public", "max_bytes": 1, "uploads": 1}, "valid": false},
+    {"name": "relative guest path", "mount": {"guest_path": "lemc/public", "upstream": "storage", "path": "/public", "max_bytes": 1, "uploads": 1}, "valid": false},
+    {"name": "guest root", "mount": {"guest_path": "/", "upstream": "storage", "path": "/public", "max_bytes": 1, "uploads": 1}, "valid": false},
+    {"name": "unclean upstream path", "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "/public/../cache", "max_bytes": 1, "uploads": 1}, "valid": false},
+    {"name": "relative upstream path", "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "public", "max_bytes": 1, "uploads": 1}, "valid": false},
+    {"name": "no uploads", "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "/public", "max_bytes": 1}, "valid": false},
+    {"name": "too many uploads", "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "/public", "max_bytes": 1, "uploads": 65}, "valid": false},
+    {"name": "no max_bytes", "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "/public", "uploads": 1}, "valid": false}
+  ]
+}

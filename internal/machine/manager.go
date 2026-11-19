@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -40,6 +41,7 @@ const (
 	defaultOutputLimit = 16 << 20
 	maxDriveMiB        = 64 << 10
 	maxDrives          = 16
+	maxMountUploads    = 64
 	maxFiles           = 512
 	maxFileBytes       = 1 << 20
 	maxTotalFileBytes  = 16 << 20
@@ -464,6 +466,33 @@ func (m *Manager) validate(spec api.MachineSpec) error {
 		}
 		if !filepath.IsAbs(d.GuestPath) || filepath.Clean(d.GuestPath) != d.GuestPath || d.GuestPath == "/" {
 			return errorf(api.ErrInvalidRequest, "drive %q guest path must be a clean absolute path", d.Name)
+		}
+	}
+	if len(spec.Mounts) > maxDrives {
+		return errorf(api.ErrInvalidRequest, "too many mounts")
+	}
+	upstreams := map[string]api.Upstream{}
+	for _, u := range spec.Network.Upstreams {
+		upstreams[u.Name] = u
+	}
+	mounted := map[string]bool{}
+	for _, mount := range spec.Mounts {
+		if !filepath.IsAbs(mount.GuestPath) || filepath.Clean(mount.GuestPath) != mount.GuestPath || mount.GuestPath == "/" || mounted[mount.GuestPath] {
+			return errorf(api.ErrInvalidRequest, "mount guest path %q must be a clean absolute path, used once", mount.GuestPath)
+		}
+		mounted[mount.GuestPath] = true
+		if !strings.HasPrefix(mount.Path, "/") || path.Clean(mount.Path) != mount.Path {
+			return errorf(api.ErrInvalidRequest, "mount %q path must be a clean absolute upstream path", mount.GuestPath)
+		}
+		upstream, ok := upstreams[mount.Upstream]
+		if !ok {
+			return errorf(api.ErrInvalidRequest, "mount %q names no upstream of the spec", mount.GuestPath)
+		}
+		if mount.MaxBytes <= 0 || mount.Uploads < 1 || mount.Uploads > maxMountUploads {
+			return errorf(api.ErrInvalidRequest, "mount %q needs max_bytes and 1 to %d uploads", mount.GuestPath, maxMountUploads)
+		}
+		if !mount.ReadOnly && !upstream.AllowWrite {
+			return errorf(api.ErrInvalidRequest, "writable mount %q needs an upstream that allows writes", mount.GuestPath)
 		}
 	}
 	total := 0

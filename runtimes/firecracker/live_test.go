@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http/httptest"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/jaredfolkins/vmcp/api"
 	"github.com/jaredfolkins/vmcp/internal/machine"
+	"github.com/jaredfolkins/vmcp/runtimes/firecracker/internal/objectmount/objectmounttest"
 )
 
 var (
@@ -64,6 +66,10 @@ type liveCfg struct {
 	// DeleteAfterStartMS are the delays after StartMachine began at which
 	// the manager subtest deletes a machine.
 	DeleteAfterStartMS []int `json:"delete_after_start_ms"`
+	// ObjectMountToken is the fake upstream token of the object-mount
+	// subtest; ObjectMountLargeBytes is the size of its streamed file.
+	ObjectMountToken      string `json:"object_mount_token"`
+	ObjectMountLargeBytes int    `json:"object_mount_large_bytes"`
 }
 
 func loadLiveCfg(t *testing.T) liveCfg {
@@ -750,6 +756,74 @@ func TestLiveFirecracker(t *testing.T) {
 				t.Errorf("enforcer acted on a live machine's network: %s", line)
 			}
 		}
+	})
+	// Object mounts on a real guest: the agent serves each mount with FUSE
+	// through the upstream broker, which adds the token. A non-root process
+	// writes a small file, streams a large one, writes through a shell
+	// redirect with a child, and reads a stored object; a read-only mount
+	// refuses a write; each mount reports its close; and no event holds the
+	// token.
+	t.Run("object-mount", func(t *testing.T) {
+		if c.ObjectMountToken == "" || c.ObjectMountLargeBytes <= 1<<20 {
+			t.Fatal("live config needs object_mount_token and object_mount_large_bytes over 1 MiB")
+		}
+		store := objectmounttest.New("/root", c.ObjectMountToken)
+		store.Put("seed.txt", []byte("seed\n"))
+		srv := httptest.NewServer(store)
+		defer srv.Close()
+		script := strings.Join([]string{
+			"echo small > /data/small.txt",
+			fmt.Sprintf("head -c %d /dev/zero > /data/large.bin", c.ObjectMountLargeBytes),
+			"{ echo a; sh -c 'echo child'; echo b; } > /data/r.txt",
+			"cat /data/r.txt",
+			"wc -c < /data/large.bin",
+			"cat /ro/seed.txt",
+			"echo x > /ro/new.txt 2>/dev/null && echo RO_WRITTEN || echo RO_REFUSED",
+		}, "; ")
+		rec, res, _ := runLive(t, ctx, rt, "m-0b1ec70000000001", 8, api.MachineSpec{
+			Network: api.Network{Upstreams: []api.Upstream{
+				{Name: "store", URL: srv.URL, Token: c.ObjectMountToken, AllowWrite: true},
+			}},
+			Mounts: []api.Mount{
+				{GuestPath: "/data", Upstream: "store", Path: "/root", MaxBytes: 1 << 30, Uploads: 2},
+				{GuestPath: "/ro", Upstream: "store", Path: "/root", ReadOnly: true, MaxBytes: 1, Uploads: 1},
+			},
+			Process: api.Process{Args: []string{"/bin/sh", "-c", script}},
+		}, "1000:1000")
+		if res.Exit == nil || res.Exit.Code != 0 {
+			t.Errorf("exit = %+v, want code 0; events: %s", res.Exit, rec.dump())
+		}
+		want := fmt.Sprintf("a\nchild\nb\n%d\nseed\nRO_REFUSED\n", c.ObjectMountLargeBytes)
+		if out := rec.output(api.EventStdout); out != want {
+			t.Errorf("stdout = %q, want %q; stderr %q", out, want, rec.output(api.EventStderr))
+		}
+		if got, _, _ := store.Object("small.txt"); string(got) != "small\n" {
+			t.Errorf("stored small.txt = %q", got)
+		}
+		if got, ok, chunked := store.Object("large.bin"); !ok || len(got) != c.ObjectMountLargeBytes || !chunked {
+			t.Errorf("stored large.bin: %v, %d bytes, chunked %v; want %d bytes in one chunked upload", ok, len(got), chunked, c.ObjectMountLargeBytes)
+		}
+		if _, ok, _ := store.Object("new.txt"); ok {
+			t.Error("the read-only mount stored a file")
+		}
+		closed := 0
+		rec.mu.Lock()
+		for _, ev := range rec.events {
+			if ev.Kind == api.EventStep && strings.HasPrefix(ev.Step, "object-mount ") {
+				if ev.Status != "completed" {
+					t.Errorf("mount close %s = %s %q, want completed", ev.Step, ev.Status, ev.Detail)
+				}
+				closed++
+			}
+		}
+		rec.mu.Unlock()
+		if closed != 2 {
+			t.Errorf("%d mount close steps, want 2", closed)
+		}
+		if strings.Contains(rec.dump(), c.ObjectMountToken) {
+			t.Error("an event holds the upstream token")
+		}
+		checkProof(t, rt, res)
 	})
 	// The gateway broker on a real guest: direct TCP to HTTP and SSH ports
 	// and direct UDP DNS reach public hosts with no proxy; metadata,

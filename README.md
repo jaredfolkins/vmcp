@@ -196,6 +196,17 @@ A drive upload is a tar stream. vmcp refuses one with more file content
 than the drive size, with more than one entry for each 4 KiB of the drive
 size plus 4096, or with a stream larger than both allow.
 
+An object mount (`mounts`) is a guest folder that an upstream serves with
+the object mount protocol of `api.Mount`. The guest agent serves it with
+FUSE: each file operation becomes an HTTP request through the upstream
+broker, which adds the upstream token, so no file byte is stored on a guest
+or host disk. A write-only open streams in order as one upload; every other
+write uses a write-back buffer within one quarter of the guest memory. A
+file is stored when its last descriptor closes. A writable mount needs an
+upstream with `allow_write`; `read_only` refuses writes. After the process
+exits, the agent waits up to 60 seconds for the last uploads and reports
+each mount as an `object-mount <path>` step.
+
 ## Development
 
 Go is pinned to `1.26.2`.

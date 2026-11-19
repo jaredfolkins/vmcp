@@ -442,6 +442,7 @@ A caller uses vmcp in this order. Each step is a general API feature.
 | Input files | Upload drive tars before start |
 | Output | Follow `GET /v1/machines/{id}/events`; download writable drives after the exit |
 | Guest access to services | `network.upstreams`, with `allow_write` for writes; tokens stay on the host |
+| Files in a caller store | `mounts` on an upstream that speaks the object mount protocol (`api.Mount`) |
 | Guest TCP and UDP to public hosts | `network.gateway` |
 | Outbound traffic record | `flow` events in the machine event stream |
 | Secrets in guest output | `redactions` |

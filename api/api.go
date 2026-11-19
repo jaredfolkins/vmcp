@@ -91,6 +91,7 @@ type MachineSpec struct {
 	Resources Resources `json:"resources"`
 	Network   Network   `json:"network"`
 	Drives    []Drive   `json:"drives,omitempty"`
+	Mounts    []Mount   `json:"mounts,omitempty"`
 	Files     []File    `json:"files,omitempty"`
 	// TimeoutSeconds bounds an ephemeral process. Zero means no limit and is
 	// valid only for a persistent machine.
@@ -167,6 +168,49 @@ type Drive struct {
 	SizeMiB   int    `json:"size_mib"`
 	Writable  bool   `json:"writable"`
 }
+
+// Mount is a guest folder that an upstream serves with the object mount
+// protocol. The guest uses it as ordinary files; the guest agent turns each
+// file operation into an HTTP request to the upstream broker, so no file
+// byte is stored on a guest or host disk. The broker adds the upstream
+// token, as for every upstream.
+//
+// The object mount protocol, with paths below Path and folders that end
+// with a slash:
+//
+//	GET    <folder>/?list[&token=<next>]  200 {"entries":[{"name","folder","size","modified"}],"next":"<token>"}
+//	                                      names are relative to the folder; a folder name ends with "/"
+//	HEAD   <file>                         200 with Content-Length and Last-Modified, or 404
+//	GET    <file>                         200, or 206 for one "Range: bytes=first-last", 416 past the end, 404
+//	PUT    <file>                         201; the body has a Content-Length, or it is chunked and
+//	                                      ObjectMountMaxBytesHeader declares its largest size
+//	DELETE <file>                         204, or 404
+//
+// A write becomes visible only when its whole body is stored. 413 refuses a
+// body that is too large, 429 a write while the upstream is busy, and 401 a
+// request after the upstream stopped accepting the token.
+type Mount struct {
+	// GuestPath is a clean absolute guest folder.
+	GuestPath string `json:"guest_path"`
+	// Upstream names an entry of Network.Upstreams. A writable mount needs
+	// an upstream with AllowWrite.
+	Upstream string `json:"upstream"`
+	// Path is the clean absolute upstream path of the mount root, such as
+	// "/public".
+	Path     string `json:"path"`
+	ReadOnly bool   `json:"read_only,omitempty"`
+	// MaxBytes is the largest object that one write may store: the
+	// declared size of a chunked write. The upstream refuses a larger one.
+	MaxBytes int64 `json:"max_bytes"`
+	// Uploads is the number of writes that the upstream takes at once, 1 to
+	// 64. The guest waits for a free one, so the upstream should not see
+	// more and answer 429.
+	Uploads int `json:"uploads"`
+}
+
+// ObjectMountMaxBytesHeader declares the largest size of a chunked object
+// mount write.
+const ObjectMountMaxBytesHeader = "Object-Max-Bytes"
 
 // File is one read-only file that vmcp writes into the guest. vmcp clears
 // a secret body after use and never returns it.

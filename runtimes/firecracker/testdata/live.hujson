@@ -33,4 +33,8 @@
   // start began. On the reference host Provision took less than 20 ms, so
   // the short delays aim at it; the subtest logs the window that it hit.
   "delete_after_start_ms": [0, 1, 2, 3, 5, 8, 13, 100],
+  // The object-mount subtest: a fake upstream token, which the host broker
+  // adds and no event may hold, and the size of the file that it streams.
+  "object_mount_token": "live-gate-fake-object-mount-token",
+  "object_mount_large_bytes": 8388608,
 }

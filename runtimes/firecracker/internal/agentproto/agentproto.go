@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 )
 
 // Version is the protocol version in Hello and Config. Version 3 adds
@@ -64,6 +65,9 @@ type Config struct {
 	// the spec. Empty means root in the guest.
 	User   string  `json:"user"`
 	Drives []Drive `json:"drives,omitempty"`
+	// Mounts are object mounts (api.Mount) with the resolved upstream URL
+	// of their root.
+	Mounts []Mount `json:"mounts,omitempty"`
 	Files  []File  `json:"files,omitempty"`
 	// DNS is the resolver address for /etc/resolv.conf. Empty means no
 	// DNS.
@@ -81,6 +85,21 @@ type Drive struct {
 	Device    string `json:"device"`
 	GuestPath string `json:"guest_path"`
 	Writable  bool   `json:"writable"`
+}
+
+// ObjectMountDrain bounds the wait of the agent, after the process ended,
+// for the uploads of the object mounts. The host adds it to the stop time
+// of a machine with mounts.
+const ObjectMountDrain = 60 * time.Second
+
+// Mount is one object mount: the guest folder, the upstream URL of its
+// root as the guest reaches it, and whether it refuses writes.
+type Mount struct {
+	GuestPath string `json:"guest_path"`
+	URL       string `json:"url"`
+	ReadOnly  bool   `json:"read_only,omitempty"`
+	MaxBytes  int64  `json:"max_bytes"`
+	Uploads   int    `json:"uploads"`
 }
 
 // File is one file to write before the process starts.

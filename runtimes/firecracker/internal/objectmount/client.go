@@ -1,0 +1,267 @@
+package objectmount
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/jaredfolkins/vmcp/api"
+)
+
+// uploadWait bounds the wait for an upload slot, so a process that keeps
+// more files open for writing than the mount has slots gets an error, not a
+// hang.
+const uploadWait = 60 * time.Second
+
+// releaseWait bounds the upload of a file after its last close.
+const releaseWait = 5 * time.Minute
+
+// attr is the size and change time of one file.
+type attr struct {
+	size     int64
+	modified time.Time
+}
+
+// entry is one entry of a folder listing.
+type entry struct {
+	Name     string `json:"name"`
+	Folder   bool   `json:"folder"`
+	Size     int64  `json:"size"`
+	Modified string `json:"modified"`
+}
+
+// client speaks the object mount protocol (api.Mount) to one upstream root.
+type client struct {
+	base     string
+	http     *http.Client
+	maxBytes int64
+	uploads  chan struct{}
+}
+
+func newClient(base string, maxBytes int64, uploads int, transport http.RoundTripper) *client {
+	return &client{
+		base:     strings.TrimSuffix(base, "/"),
+		http:     &http.Client{Transport: transport},
+		maxBytes: maxBytes,
+		uploads:  make(chan struct{}, uploads),
+	}
+}
+
+// url escapes each segment of a mount-relative path.
+func (c *client) url(rel string, folder bool, query string) string {
+	var b strings.Builder
+	b.WriteString(c.base)
+	for _, segment := range strings.Split(rel, "/") {
+		if segment == "" {
+			continue
+		}
+		b.WriteString("/")
+		b.WriteString(url.PathEscape(segment))
+	}
+	if folder {
+		b.WriteString("/")
+	}
+	b.WriteString(query)
+	return b.String()
+}
+
+func (c *client) do(ctx context.Context, method, target string, body io.Reader, header http.Header) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, target, body)
+	if err != nil {
+		return nil, err
+	}
+	for name, values := range header {
+		req.Header[name] = values
+	}
+	return c.http.Do(req)
+}
+
+// statusErrno maps a protocol status to the errno that the file operation
+// returns.
+func statusErrno(code int) syscall.Errno {
+	switch {
+	case code == http.StatusNotFound:
+		return syscall.ENOENT
+	case code == http.StatusRequestEntityTooLarge:
+		return syscall.EFBIG
+	case code == http.StatusUnauthorized || code == http.StatusForbidden:
+		return syscall.EACCES
+	case code == http.StatusTooManyRequests:
+		return syscall.EAGAIN
+	case code >= 400 && code < 500:
+		return syscall.EINVAL
+	default:
+		return syscall.EIO
+	}
+}
+
+func drain(resp *http.Response) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	_ = resp.Body.Close()
+}
+
+// errno returns the errno of err; an unknown error is EIO.
+func errno(err error) syscall.Errno {
+	if err == nil {
+		return 0
+	}
+	var e syscall.Errno
+	if errors.As(err, &e) {
+		return e
+	}
+	return syscall.EIO
+}
+
+func (c *client) head(ctx context.Context, rel string) (attr, error) {
+	resp, err := c.do(ctx, http.MethodHead, c.url(rel, false, ""), nil, nil)
+	if err != nil {
+		return attr{}, err
+	}
+	drain(resp)
+	if resp.StatusCode != http.StatusOK {
+		return attr{}, statusErrno(resp.StatusCode)
+	}
+	size, err := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
+	if err != nil || size < 0 {
+		return attr{}, syscall.EIO
+	}
+	modified, _ := http.ParseTime(resp.Header.Get("Last-Modified"))
+	return attr{size: size, modified: modified}, nil
+}
+
+// list returns every entry of a folder; "" is the mount root.
+func (c *client) list(ctx context.Context, folder string) ([]entry, error) {
+	var all []entry
+	token := ""
+	for {
+		query := "?list"
+		if token != "" {
+			query += "&token=" + url.QueryEscape(token)
+		}
+		resp, err := c.do(ctx, http.MethodGet, c.url(folder, true, query), nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			drain(resp)
+			return nil, statusErrno(resp.StatusCode)
+		}
+		var page struct {
+			Entries []entry `json:"entries"`
+			Next    string  `json:"next"`
+		}
+		err = json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&page)
+		drain(resp)
+		if err != nil {
+			return nil, fmt.Errorf("decode listing: %w", syscall.EIO)
+		}
+		all = append(all, page.Entries...)
+		if page.Next == "" {
+			return all, nil
+		}
+		token = page.Next
+	}
+}
+
+// read returns at most n bytes from off; a read past the end is empty.
+func (c *client) read(ctx context.Context, rel string, off int64, n int) ([]byte, error) {
+	header := http.Header{"Range": {fmt.Sprintf("bytes=%d-%d", off, off+int64(n)-1)}}
+	resp, err := c.do(ctx, http.MethodGet, c.url(rel, false, ""), nil, header)
+	if err != nil {
+		return nil, err
+	}
+	defer drain(resp)
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+	case http.StatusRequestedRangeNotSatisfiable:
+		return nil, nil
+	case http.StatusOK:
+		if off != 0 {
+			return nil, syscall.EIO
+		}
+	default:
+		return nil, statusErrno(resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(n)))
+	if err != nil {
+		return nil, syscall.EIO
+	}
+	return data, nil
+}
+
+// open streams a whole file.
+func (c *client) open(ctx context.Context, rel string) (io.ReadCloser, int64, error) {
+	resp, err := c.do(ctx, http.MethodGet, c.url(rel, false, ""), nil, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		drain(resp)
+		return nil, 0, statusErrno(resp.StatusCode)
+	}
+	return resp.Body, resp.ContentLength, nil
+}
+
+// acquire takes an upload slot.
+func (c *client) acquire(ctx context.Context) error {
+	timer := time.NewTimer(uploadWait)
+	defer timer.Stop()
+	select {
+	case c.uploads <- struct{}{}:
+		return nil
+	case <-timer.C:
+		return syscall.EAGAIN
+	case <-ctx.Done():
+		return syscall.EINTR
+	}
+}
+
+func (c *client) releaseSlot() { <-c.uploads }
+
+// put writes a whole file. size is its exact length, or -1 for a chunked
+// body of at most maxBytes. The caller holds an upload slot.
+func (c *client) put(ctx context.Context, rel string, body io.Reader, size int64) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.url(rel, false, ""), body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if size >= 0 {
+		req.ContentLength = size
+		if size == 0 {
+			req.Body = http.NoBody
+		}
+	} else {
+		req.ContentLength = -1
+		req.Header.Set(api.ObjectMountMaxBytesHeader, strconv.FormatInt(c.maxBytes, 10))
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	drain(resp)
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return statusErrno(resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *client) remove(ctx context.Context, rel string) error {
+	resp, err := c.do(ctx, http.MethodDelete, c.url(rel, false, ""), nil, nil)
+	if err != nil {
+		return err
+	}
+	drain(resp)
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return statusErrno(resp.StatusCode)
+	}
+	return nil
+}

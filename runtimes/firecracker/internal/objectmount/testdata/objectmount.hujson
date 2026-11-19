@@ -1,0 +1,45 @@
+{
+  // Object mount file system tests. The mount uses a fake upstream that
+  // speaks the object mount protocol in memory.
+  "small_file": 4096,
+  "uploads": 2,
+  "max_bytes": 1048576,
+  "write_back": 65536,
+  // A file at most small_file bytes goes with its exact length; a larger one
+  // streams as one chunked upload.
+  "small_size": 1000,
+  "large_size": 200000,
+  // A read-write file larger than write_back fails with EFBIG.
+  "over_budget_size": 70000,
+  // A file over max_bytes fails and leaves no object.
+  "over_max_size": 1100000,
+  // Waits past the one-second entry timeout of the kernel, so a lookup
+  // reaches the file system again.
+  "entry_wait_ms": 1200,
+  // Shell writes. FILE is the mount path of the file. A redirect closes a
+  // copy of the descriptor before it writes, and a child process inherits
+  // the descriptor and closes it before the shell writes again. The read
+  // right after the close must see the whole file.
+  "shell": [
+    {
+      // head writes more than small_file, so the file streams before the
+      // child closes its copy of the descriptor.
+      "name": "redirect with children",
+      "script": "{ head -c 5000 /dev/zero; sh -c 'echo child'; echo b; } > \"$FILE\"; wc -c < \"$FILE\"; tail -c 8 \"$FILE\"",
+      "want": "5008\nchild\nb\n",
+      "stored_size": 5008
+    },
+    {
+      "name": "overwrite with a redirect",
+      "script": "echo first > \"$FILE\"; echo second > \"$FILE\"; cat \"$FILE\"",
+      "want": "second\n",
+      "stored_size": 7
+    },
+    {
+      "name": "append with a redirect",
+      "script": "echo one > \"$FILE\"; echo two >> \"$FILE\"; cat \"$FILE\"",
+      "want": "one\ntwo\n",
+      "stored_size": 8
+    }
+  ]
+}

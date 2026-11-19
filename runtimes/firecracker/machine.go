@@ -275,6 +275,15 @@ func (m *Machine) writeConfigs() error {
 		for name, u := range urls {
 			cfg.Env = append(cfg.Env, "VMCP_UPSTREAM_"+strings.ToUpper(name)+"="+u)
 		}
+		for _, mount := range m.spec.Spec.Mounts {
+			cfg.Mounts = append(cfg.Mounts, agentproto.Mount{
+				GuestPath: mount.GuestPath,
+				URL:       strings.TrimSuffix(urls[mount.Upstream], "/") + mount.Path,
+				ReadOnly:  mount.ReadOnly,
+				MaxBytes:  mount.MaxBytes,
+				Uploads:   mount.Uploads,
+			})
+		}
 	}
 	raw, err := agentproto.EncodeConfig(cfg)
 	for i := range cfg.Files {
@@ -485,7 +494,11 @@ func (m *Machine) Stop(reason string, grace time.Duration) {
 		return
 	}
 	m.log.DebugContext(logCtx, "machine stop sent", "reason", reason, "grace_ms", trace.Millis(grace))
-	time.AfterFunc(grace+stopDriveTime(m.spec.Spec.Drives), func() {
+	wait := grace + stopDriveTime(m.spec.Spec.Drives)
+	if len(m.spec.Spec.Mounts) > 0 {
+		wait += agentproto.ObjectMountDrain
+	}
+	time.AfterFunc(wait, func() {
 		select {
 		case <-m.done:
 		default:

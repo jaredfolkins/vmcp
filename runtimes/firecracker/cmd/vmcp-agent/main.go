@@ -84,6 +84,10 @@ func run(ev *events) (code int, export bool, err error) {
 	if err := buildRoot(cfg, secrets); err != nil {
 		return 0, false, err
 	}
+	mounts, err := mountObjects(cfg.Mounts)
+	if err != nil {
+		return 0, false, err
+	}
 	// Secret entries come last, so they replace a same-named entry.
 	cfg.Env = append(cfg.Env, secrets.Env...)
 	ev.send(agentproto.Message{Type: agentproto.TypeStep, Step: "start-process", Status: "running"})
@@ -92,6 +96,14 @@ func run(ev *events) (code int, export bool, err error) {
 		return 0, false, err
 	}
 	ev.send(agentproto.Message{Type: agentproto.TypeStep, Step: "start-process", Status: "completed"})
+	// The process has ended. Each mount stores the files that it closed.
+	for i, server := range mounts {
+		status, detail := "completed", ""
+		if err := server.Close(agentproto.ObjectMountDrain); err != nil {
+			status, detail = "failed", err.Error()
+		}
+		ev.send(agentproto.Message{Type: agentproto.TypeStep, Step: "object-mount " + cfg.Mounts[i].GuestPath, Status: status, Detail: detail})
+	}
 	for _, d := range cfg.Drives {
 		if !d.Writable {
 			continue
