@@ -1,0 +1,14 @@
+// Input for TestFileSizeLimitCoversEveryDiskImage. Sizes are in MiB; the
+// wanted limit is in bytes. The slack is 16 MiB.
+{
+  "cases": [
+    // No disk size: the default root layer of 1024 MiB.
+    {"name": "default disk", "disk_mib": 0, "drives_mib": [], "want_bytes": 1090519040},
+    // A small root layer keeps the 1 GiB floor.
+    {"name": "small disk", "disk_mib": 256, "drives_mib": [], "want_bytes": 1073741824},
+    // A root layer larger than 1 GiB raises the limit.
+    {"name": "large disk", "disk_mib": 4096, "drives_mib": [], "want_bytes": 4311744512},
+    // The largest image decides.
+    {"name": "large drive", "disk_mib": 2048, "drives_mib": [512, 8192], "want_bytes": 8606711808},
+  ],
+}

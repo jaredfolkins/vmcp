@@ -923,6 +923,18 @@ func TestLiveFirecracker(t *testing.T) {
 			checkProof(t, rt, m.Result())
 		})
 	}
+	// A writable root layer larger than 1 GiB on a real guest: a write past
+	// 1 GiB must not end the Firecracker process with SIGXFSZ.
+	t.Run("large-disk", func(t *testing.T) {
+		rec, res, _ := runLive(t, ctx, rt, "m-1a59ed1500000001", 12, api.MachineSpec{
+			Resources: api.Resources{VCPUs: 1, MemoryMiB: 256, DiskMiB: 2048},
+			Process:   api.Process{Args: []string{"/bin/sh", "-c", "dd if=/dev/zero of=/fill bs=1M count=1300 2>/dev/null && sync && echo LARGE_DISK_OK"}},
+		}, "")
+		if res.Exit == nil || res.Exit.Code != 0 || !strings.Contains(rec.output(api.EventStdout), "LARGE_DISK_OK") {
+			t.Errorf("exit = %+v, stdout %q; want code 0 and LARGE_DISK_OK; events: %s", res.Exit, rec.output(api.EventStdout), rec.dump())
+		}
+		checkProof(t, rt, res)
+	})
 	// An exposed guest port on a real guest: the host connects to a guest
 	// loopback listener through the agent relay over vsock, with no guest
 	// network. Bytes go in the two directions. A port that the spec does
