@@ -24,6 +24,19 @@ const uploadWait = 60 * time.Second
 // releaseWait bounds the upload of a file after its last close.
 const releaseWait = 5 * time.Minute
 
+// streamStallWait bounds one step of a streamed upload: the upstream must
+// take one write, and must answer after the last byte, in this time. A
+// stream that makes progress has no total time limit.
+const streamStallWait = 5 * time.Minute
+
+// maxListEntries bounds the entries of one folder listing. The listing is in
+// guest memory, so an upstream that sends pages without an end must not
+// fill it.
+const maxListEntries = 100_000
+
+// errStalled ends a streamed upload that the upstream stopped reading.
+var errStalled = errors.New("object mount: the upstream stopped reading the upload")
+
 // readAhead is the least number of bytes that one read request fetches.
 const readAhead = 4 << 20
 
@@ -64,14 +77,20 @@ type client struct {
 	http     *http.Client
 	maxBytes int64
 	uploads  chan struct{}
+	// listLimit is the largest number of entries of one folder listing.
+	listLimit int
+	// stallWait bounds one step of a streamed upload.
+	stallWait time.Duration
 }
 
 func newClient(base string, maxBytes int64, uploads int, transport http.RoundTripper) *client {
 	return &client{
-		base:     strings.TrimSuffix(base, "/"),
-		http:     &http.Client{Transport: transport},
-		maxBytes: maxBytes,
-		uploads:  make(chan struct{}, uploads),
+		base:      strings.TrimSuffix(base, "/"),
+		http:      &http.Client{Transport: transport},
+		maxBytes:  maxBytes,
+		uploads:   make(chan struct{}, uploads),
+		listLimit: maxListEntries,
+		stallWait: streamStallWait,
 	}
 }
 
@@ -184,8 +203,15 @@ func (c *client) list(ctx context.Context, folder string) ([]entry, error) {
 			return nil, fmt.Errorf("decode listing: %w", syscall.EIO)
 		}
 		all = append(all, page.Entries...)
+		if len(all) > c.listLimit {
+			return nil, fmt.Errorf("listing has more than %d entries: %w", c.listLimit, syscall.EOVERFLOW)
+		}
 		if page.Next == "" {
 			return all, nil
+		}
+		// An empty page or the same token again is a listing without an end.
+		if len(page.Entries) == 0 || page.Next == token {
+			return nil, fmt.Errorf("listing does not advance: %w", syscall.EIO)
 		}
 		token = page.Next
 	}

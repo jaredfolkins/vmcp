@@ -16,8 +16,9 @@ import (
 const objectSmallFile = 1 << 20
 
 // mountObjects serves each object mount in the guest root. One quarter of
-// the guest memory is one write-back budget, shared by the mounts.
-func mountObjects(mounts []agentproto.Mount) ([]*objectmount.Server, error) {
+// the guest memory is one write-back budget, shared by the mounts. The
+// process user owns the files, and the kernel enforces their modes.
+func mountObjects(mounts []agentproto.Mount, uid, gid uint32) ([]*objectmount.Server, error) {
 	if len(mounts) == 0 {
 		return nil, nil
 	}
@@ -43,6 +44,8 @@ func mountObjects(mounts []agentproto.Mount) ([]*objectmount.Server, error) {
 			Uploads:     m.Uploads,
 			SmallFile:   objectSmallFile,
 			AllowOther:  true,
+			UID:         uid,
+			GID:         gid,
 			DirectMount: true,
 			Proc:        filepath.Join(mergedRoot, "proc"),
 		})

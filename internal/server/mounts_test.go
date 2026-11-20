@@ -22,7 +22,10 @@ type mountsTestInput struct {
 	Cases     []struct {
 		Name  string    `json:"name"`
 		Mount api.Mount `json:"mount"`
-		Valid bool      `json:"valid"`
+		// Drives and Mounts are the other drives and mounts of the spec.
+		Drives []api.Drive `json:"drives"`
+		Mounts []api.Mount `json:"mounts"`
+		Valid  bool        `json:"valid"`
 	} `json:"cases"`
 }
 
@@ -52,18 +55,27 @@ func readMountsInput(t *testing.T) mountsTestInput {
 // mount on an upstream of the spec and refuses one with an unknown
 // upstream, a write to an upstream without allow_write, an unclean or
 // relative guest or upstream path, the guest root, no max_bytes, or an
-// uploads count out of range.
+// uploads count out of range. It also refuses a mount that shares a guest
+// folder tree with a drive or with a different mount.
 func TestCreateValidatesMounts(t *testing.T) {
 	in := readMountsInput(t)
 	h := newHarness(t, t.TempDir())
 	img := h.image(t)
 	for i, c := range in.Cases {
 		t.Run(c.Name, func(t *testing.T) {
-			_, err := h.c.CreateMachine(context.Background(), api.MachineSpec{
+			m, err := h.c.CreateMachine(context.Background(), api.MachineSpec{
 				Name: fmt.Sprintf("mount-%d", i), Lifecycle: api.Ephemeral, Image: img, TimeoutSeconds: 30,
 				Network: api.Network{Upstreams: in.Upstreams},
-				Mounts:  []api.Mount{c.Mount},
+				Drives:  c.Drives,
+				Mounts:  append(append([]api.Mount(nil), c.Mounts...), c.Mount),
 			})
+			if err == nil {
+				// The harness has few machine slots. An accepted machine
+				// gives its slot back.
+				if _, err := h.c.DeleteMachine(context.Background(), m.ID); err != nil {
+					t.Fatalf("DeleteMachine() error = %v", err)
+				}
+			}
 			switch {
 			case c.Valid && err != nil:
 				t.Errorf("CreateMachine() error = %v, want the mount accepted", err)

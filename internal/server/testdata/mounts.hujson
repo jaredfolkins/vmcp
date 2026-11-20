@@ -16,6 +16,15 @@
     {"name": "relative upstream path", "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "public", "max_bytes": 1, "uploads": 1}, "valid": false},
     {"name": "no uploads", "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "/public", "max_bytes": 1}, "valid": false},
     {"name": "too many uploads", "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "/public", "max_bytes": 1, "uploads": 65}, "valid": false},
+    // A mount must not share a guest folder tree with a drive or with a
+    // different mount of the spec.
+    {"name": "mount beside a drive", "drives": [{"name": "work", "guest_path": "/lemc/work", "size_mib": 16}], "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "/public", "max_bytes": 1, "uploads": 1}, "valid": true},
+    {"name": "mount with a name that starts as a drive path", "drives": [{"name": "work", "guest_path": "/lemc/pub", "size_mib": 16}], "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "/public", "max_bytes": 1, "uploads": 1}, "valid": true},
+    {"name": "mount on a drive path", "drives": [{"name": "work", "guest_path": "/lemc/public", "size_mib": 16}], "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "/public", "max_bytes": 1, "uploads": 1}, "valid": false},
+    {"name": "mount in a drive", "drives": [{"name": "work", "guest_path": "/lemc", "size_mib": 16}], "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "/public", "max_bytes": 1, "uploads": 1}, "valid": false},
+    {"name": "drive in a mount", "drives": [{"name": "work", "guest_path": "/lemc/public/work", "size_mib": 16}], "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "/public", "max_bytes": 1, "uploads": 1}, "valid": false},
+    {"name": "mount in a mount", "mounts": [{"guest_path": "/lemc", "upstream": "storage", "path": "/private", "max_bytes": 1, "uploads": 1}], "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "/public", "max_bytes": 1, "uploads": 1}, "valid": false},
+    {"name": "two mounts side by side", "mounts": [{"guest_path": "/lemc/private", "upstream": "storage", "path": "/private", "max_bytes": 1, "uploads": 1}], "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "/public", "max_bytes": 1, "uploads": 1}, "valid": true},
     {"name": "no max_bytes", "mount": {"guest_path": "/lemc/public", "upstream": "storage", "path": "/public", "uploads": 1}, "valid": false}
   ]
 }

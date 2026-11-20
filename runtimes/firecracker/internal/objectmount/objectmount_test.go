@@ -26,20 +26,24 @@ import (
 var objectMountTestConfig = flag.String("vmcp-objectmount-config", "testdata/objectmount.hujson", "HuJSON file for the object mount tests")
 
 type objectMountTestInput struct {
-	SmallFile      int    `json:"small_file"`
-	Uploads        int    `json:"uploads"`
-	MaxBytes       int64  `json:"max_bytes"`
-	WriteBack      int64  `json:"write_back"`
-	SmallSize      int    `json:"small_size"`
-	LargeSize      int    `json:"large_size"`
-	OverBudgetSize int    `json:"over_budget_size"`
-	OverMaxSize    int    `json:"over_max_size"`
-	EarlierBody    string `json:"earlier_body"`
-	ReadAheadSize  int    `json:"read_ahead_size"`
-	ReadBlock      int    `json:"read_block"`
-	MaxGets        int    `json:"max_gets"`
-	EntryWaitMS    int    `json:"entry_wait_ms"`
-	Shell          []struct {
+	SmallFile       int    `json:"small_file"`
+	Uploads         int    `json:"uploads"`
+	MaxBytes        int64  `json:"max_bytes"`
+	WriteBack       int64  `json:"write_back"`
+	SmallSize       int    `json:"small_size"`
+	LargeSize       int    `json:"large_size"`
+	OverBudgetSize  int    `json:"over_budget_size"`
+	OverMaxSize     int    `json:"over_max_size"`
+	EarlierBody     string `json:"earlier_body"`
+	ReadAheadSize   int    `json:"read_ahead_size"`
+	ReadBlock       int    `json:"read_block"`
+	MaxGets         int    `json:"max_gets"`
+	EntryWaitMS     int    `json:"entry_wait_ms"`
+	ListLimit       int    `json:"list_limit"`
+	ListPageEntries int    `json:"list_page_entries"`
+	StallWaitMS     int    `json:"stall_wait_ms"`
+	StallDeadlineMS int    `json:"stall_deadline_ms"`
+	Shell           []struct {
 		Name       string `json:"name"`
 		Script     string `json:"script"`
 		Want       string `json:"want"`
@@ -65,7 +69,8 @@ func readObjectMountTestInput(t *testing.T) objectMountTestInput {
 	}
 	if in.SmallSize > in.SmallFile || in.LargeSize <= in.SmallFile || in.OverBudgetSize <= int(in.WriteBack) ||
 		int64(in.OverMaxSize) <= in.MaxBytes || len(in.Shell) == 0 || in.ReadAheadSize <= 0 || in.ReadBlock <= 0 || in.MaxGets <= 0 ||
-		in.EarlierBody == "" {
+		in.EarlierBody == "" || in.ListLimit <= 0 || in.ListPageEntries <= 0 || in.StallWaitMS <= 0 ||
+		in.StallDeadlineMS <= in.StallWaitMS {
 		t.Fatal("object mount test input sizes do not fit the limits")
 	}
 	return in
@@ -284,7 +289,8 @@ func TestObjectMountShellWrites(t *testing.T) {
 
 // TestObjectMountModesAndReadAhead proves that a file keeps the mode of its
 // create and of a later chmod through the mode header, that a rename keeps
-// the mode, and that a sequential read fetches ahead, so it sends few GET
+// the mode, that the kernel enforces the mode, and that a sequential read
+// fetches ahead, so it sends few GET
 // requests.
 func TestObjectMountModesAndReadAhead(t *testing.T) {
 	in := readObjectMountTestInput(t)
@@ -311,6 +317,31 @@ func TestObjectMountModesAndReadAhead(t *testing.T) {
 	}
 	if got := upstream.Mode("moved-key"); got != "0755" {
 		t.Errorf("mode after a rename = %q, want 0755", got)
+	}
+
+	// The kernel enforces the modes: the owner cannot write a file without
+	// the write bit or read a file without the read bit. The root user
+	// passes each mode check, so this part needs a different user.
+	if os.Geteuid() != 0 {
+		locked := filepath.Join(dir, "locked")
+		if err := os.WriteFile(locked, []byte("fixed"), 0o444); err != nil {
+			t.Fatal(err)
+		}
+		if f, err := os.OpenFile(locked, os.O_WRONLY, 0); !errors.Is(err, syscall.EACCES) {
+			if err == nil {
+				_ = f.Close()
+			}
+			t.Errorf("open for write of a 0444 file error = %v, want EACCES", err)
+		}
+		if err := os.Chmod(locked, 0o200); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		if _, err := os.ReadFile(locked); !errors.Is(err, syscall.EACCES) {
+			t.Errorf("read of a 0200 file error = %v, want EACCES", err)
+		}
+		if info, err := os.Stat(locked); err != nil || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+			t.Errorf("stat of a mount file = %v, %v; want the mounter as its owner", info, err)
+		}
 	}
 
 	data := pattern(in.ReadAheadSize, 7)
