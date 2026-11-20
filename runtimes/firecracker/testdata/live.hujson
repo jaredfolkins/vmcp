@@ -37,4 +37,10 @@
   // adds and no event may hold, and the size of the file that it streams.
   "object_mount_token": "live-gate-fake-object-mount-token",
   "object_mount_large_bytes": 8388608,
+  // The ports subtest: the guest loopback port that the spec exposes, a
+  // port that it does not expose, and the line that each end sends.
+  "ports_guest_port": 5900,
+  "ports_closed_port": 5901,
+  "ports_guest_line": "VMCP_LIVE_GUEST_PORT_LINE",
+  "ports_host_line": "VMCP_LIVE_HOST_PORT_LINE",
 }

@@ -36,7 +36,8 @@
   1026. The host never connects to a guest network address, no nftables
   rule changes, and vmcp opens no new listener on a network. Unit tests
   prove the agent relay, the host match, the route, and the Go client. The
-  Linux/KVM live gate for ports is NOT VERIFIED.
+  live gate has a `ports` subtest. A Linux/KVM live gate run for ports is
+  NOT VERIFIED.
 - The self-test boots a machine from a built-in agent-only image. The guest
   proves that the vmcp port, metadata, private and direct destinations are
   unreachable and that the egress broker refuses metadata.
