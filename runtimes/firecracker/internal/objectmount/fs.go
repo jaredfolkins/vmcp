@@ -649,6 +649,8 @@ type streamHandle struct {
 	written int64
 	pipe    *io.PipeWriter
 	done    chan error
+	// cancel ends the stream upload request.
+	cancel context.CancelFunc
 	// ended is set when the stream upload ended with result.
 	ended  bool
 	result syscall.Errno
@@ -688,7 +690,7 @@ func (h *streamHandle) Write(ctx context.Context, data []byte, off int64) (uint3
 				return 0, errno
 			}
 		}
-	} else if _, err := h.pipe.Write(data); err != nil {
+	} else if err := h.writeStream(data); err != nil {
 		return 0, syscall.EIO
 	}
 	h.written += int64(len(data))
@@ -722,18 +724,43 @@ func (h *streamHandle) start(ctx context.Context) syscall.Errno {
 		return errno(err)
 	}
 	reader, writer := io.Pipe()
-	h.pipe, h.done = writer, make(chan error, 1)
+	// The process that writes can go away while the stream stays open, so
+	// the request does not use the context of one write.
+	putCtx, cancel := context.WithCancel(context.Background())
+	h.pipe, h.done, h.cancel = writer, make(chan error, 1), cancel
 	go func() {
-		err := c.put(context.Background(), h.rel, reader, -1, h.f.permissions())
+		defer cancel()
+		err := c.put(putCtx, h.rel, reader, -1, h.f.permissions())
 		_ = reader.CloseWithError(err)
 		c.releaseSlot()
 		h.done <- err
 	}()
-	if _, err := writer.Write(h.buf); err != nil {
+	if err := h.writeStream(h.buf); err != nil {
 		return syscall.EIO
 	}
 	h.buf, h.dirty = nil, false
 	return 0
+}
+
+// writeStream gives data to the stream upload. An upstream that does not
+// take the bytes in stallWait ends the stream with an error, so a write
+// never waits without a limit. The upstream then aborts the upload and
+// keeps the earlier object.
+func (h *streamHandle) writeStream(data []byte) error {
+	pipe := h.pipe
+	timer := time.AfterFunc(h.f.st.c.stallWait, func() { _ = pipe.CloseWithError(errStalled) })
+	defer timer.Stop()
+	_, err := pipe.Write(data)
+	return err
+}
+
+// endStream closes the stream and waits for the answer of the upstream. An
+// upstream that does not answer in stallWait loses the request.
+func (h *streamHandle) endStream() error {
+	_ = h.pipe.Close()
+	timer := time.AfterFunc(h.f.st.c.stallWait, h.cancel)
+	defer timer.Stop()
+	return <-h.done
 }
 
 // Read lets a process read back a file that it still writes, except
@@ -789,8 +816,7 @@ func (h *streamHandle) commit(ctx context.Context) syscall.Errno {
 	case h.wb != nil:
 		return h.wb.flush(ctx)
 	case h.pipe != nil:
-		_ = h.pipe.Close()
-		h.result = errno(<-h.done)
+		h.result = errno(h.endStream())
 		h.pipe, h.ended = nil, true
 		return h.result
 	case h.ended:

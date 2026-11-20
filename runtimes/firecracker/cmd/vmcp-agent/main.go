@@ -91,7 +91,11 @@ func run(ev *events) (code int, export bool, err error) {
 	if err := buildRoot(cfg, secrets); err != nil {
 		return 0, false, err
 	}
-	mounts, err := mountObjects(cfg.Mounts)
+	mountUID, mountGID, _, err := lookupUser(cfg.User)
+	if err != nil {
+		return 0, false, err
+	}
+	mounts, err := mountObjects(cfg.Mounts, mountUID, mountGID)
 	if err != nil {
 		return 0, false, err
 	}

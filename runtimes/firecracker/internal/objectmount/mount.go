@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"syscall"
 	"time"
 
@@ -47,6 +48,12 @@ type Options struct {
 	// AllowOther lets processes of other users use the mount; it needs a
 	// root mounter.
 	AllowOther bool
+	// UID and GID own every file and folder of the mount. The kernel
+	// checks each access against that owner and the file mode
+	// (default_permissions), so a mode is a limit for the processes of the
+	// guest and not only a stored number. Zero is the user and the group
+	// of the mounter.
+	UID, GID uint32
 	// DirectMount mounts with the mount system call, as root does, and not
 	// with fusermount.
 	DirectMount bool
@@ -119,6 +126,16 @@ func Mount(dir string, opt Options) (*Server, error) {
 		AllowOther:  opt.AllowOther,
 		DirectMount: opt.DirectMount,
 	}
+	// The kernel enforces the file modes. Without this option, a mount
+	// with allow_other gives each guest user every file.
+	mountOptions.Options = append(mountOptions.Options, "default_permissions")
+	uid, gid := opt.UID, opt.GID
+	if uid == 0 {
+		uid = uint32(os.Geteuid())
+	}
+	if gid == 0 {
+		gid = uint32(os.Getegid())
+	}
 	// A read-only mount is read-only in the kernel too.
 	if opt.ReadOnly {
 		if opt.DirectMount {
@@ -129,6 +146,8 @@ func Mount(dir string, opt Options) (*Server, error) {
 	}
 	server, err := fs.Mount(dir, &dirNode{st: st}, &fs.Options{
 		MountOptions:    mountOptions,
+		UID:             uid,
+		GID:             gid,
 		EntryTimeout:    &second,
 		AttrTimeout:     &second,
 		NegativeTimeout: &second,

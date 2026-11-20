@@ -222,6 +222,12 @@ type Mount struct {
 	// "/public".
 	Path string `json:"path"`
 	// ReadOnly mounts the folder read-only in the guest kernel.
+	//
+	// Path and ReadOnly are settings of the guest mount. They are not
+	// security limits: the guest is not trusted, and its root user can send
+	// each request that the upstream token permits, on any path. The
+	// upstream must refuse a path or a write that the token must not have.
+	// vmcp enforces only AllowWrite of the upstream.
 	ReadOnly bool `json:"read_only,omitempty"`
 	// MaxBytes is the largest object that one write may store: the
 	// declared size of a chunked write. The upstream refuses a larger one.

@@ -494,6 +494,19 @@ func (m *Manager) validate(spec api.MachineSpec) error {
 		if !filepath.IsAbs(mount.GuestPath) || filepath.Clean(mount.GuestPath) != mount.GuestPath || mount.GuestPath == "/" || mounted[mount.GuestPath] {
 			return errorf(api.ErrInvalidRequest, "mount guest path %q must be a clean absolute path, used once", mount.GuestPath)
 		}
+		// A mount and a drive, or two mounts, must not share a guest folder
+		// tree: one would hide files of the other, or the drive export would
+		// read the mount.
+		for _, d := range spec.Drives {
+			if guestPathsOverlap(mount.GuestPath, d.GuestPath) {
+				return errorf(api.ErrInvalidRequest, "mount guest path %q overlaps drive %q", mount.GuestPath, d.Name)
+			}
+		}
+		for other := range mounted {
+			if guestPathsOverlap(mount.GuestPath, other) {
+				return errorf(api.ErrInvalidRequest, "mount guest path %q overlaps mount %q", mount.GuestPath, other)
+			}
+		}
 		mounted[mount.GuestPath] = true
 		if !strings.HasPrefix(mount.Path, "/") || path.Clean(mount.Path) != mount.Path {
 			return errorf(api.ErrInvalidRequest, "mount %q path must be a clean absolute upstream path", mount.GuestPath)
@@ -1412,4 +1425,10 @@ func (m *Manager) selfTest(ctx context.Context) (api.SelfTestResult, error) {
 	}
 	res.Passed = final.Exit != nil && final.Exit.Code == 0 && final.Exit.Reason == api.ExitCompleted && res.Proof.Destroyed
 	return res, nil
+}
+
+// guestPathsOverlap reports whether two clean absolute guest paths are the
+// same folder or one is in the other.
+func guestPathsOverlap(a, b string) bool {
+	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
