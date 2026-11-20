@@ -4,6 +4,7 @@ package firecracker
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http/httptest"
 	"net/netip"
 	"os"
@@ -70,6 +72,13 @@ type liveCfg struct {
 	// subtest; ObjectMountLargeBytes is the size of its streamed file.
 	ObjectMountToken      string `json:"object_mount_token"`
 	ObjectMountLargeBytes int    `json:"object_mount_large_bytes"`
+	// PortsGuestPort is the guest loopback port that the ports subtest
+	// exposes, PortsClosedPort a port that its spec does not expose, and
+	// PortsGuestLine and PortsHostLine the lines that the two ends send.
+	PortsGuestPort  int    `json:"ports_guest_port"`
+	PortsClosedPort int    `json:"ports_closed_port"`
+	PortsGuestLine  string `json:"ports_guest_line"`
+	PortsHostLine   string `json:"ports_host_line"`
 }
 
 func loadLiveCfg(t *testing.T) liveCfg {
@@ -914,6 +923,86 @@ func TestLiveFirecracker(t *testing.T) {
 			checkProof(t, rt, m.Result())
 		})
 	}
+	// An exposed guest port on a real guest: the host connects to a guest
+	// loopback listener through the agent relay over vsock, with no guest
+	// network. Bytes go in the two directions. A port that the spec does
+	// not expose gets no connection, and a dial after the exit fails.
+	t.Run("ports", func(t *testing.T) {
+		if c.PortsGuestPort == 0 || c.PortsClosedPort == 0 || c.PortsClosedPort == c.PortsGuestPort || c.PortsGuestLine == "" || c.PortsHostLine == "" {
+			t.Fatal("live config needs ports_guest_port, ports_closed_port, ports_guest_line, and ports_host_line")
+		}
+		id := "m-90b7000000000001"
+		dir := filepath.Join(rt.machinesDir(), id)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		// nc sends the guest line to the first connection and prints the
+		// bytes that it receives until the host closes. The sleep keeps the
+		// input of nc open: at its end nc closes its send direction, and
+		// the relay then closes the connection.
+		script := fmt.Sprintf("{ echo %s; sleep 20; } | nc -l -p %d", c.PortsGuestLine, c.PortsGuestPort)
+		spec := api.MachineSpec{
+			Resources: api.Resources{VCPUs: 1, MemoryMiB: 256, DiskMiB: 256},
+			Network:   api.Network{Ports: []api.Port{{Name: "live", GuestPort: c.PortsGuestPort, Protocol: api.PortProtocolTCP}}},
+			Process:   api.Process{Args: []string{"/bin/sh", "-c", script}},
+		}
+		rec := &recorder{}
+		inst, err := rt.Provision(ctx, machine.Launch{ID: id, Slot: 11, Dir: dir, ImageID: "img-live", Spec: spec,
+			Args: spec.Process.Args, Env: []string{"PATH=/bin:/usr/bin"}, WorkDir: "/", Sink: rec})
+		if err != nil {
+			t.Fatalf("Provision() error = %v", err)
+		}
+		m := inst.(*Machine)
+		t.Cleanup(func() { m.Destroy(context.Background(), "test-cleanup") })
+		if err := m.Boot(ctx); err != nil {
+			t.Fatalf("Boot() error = %v", err)
+		}
+		if _, err := m.DialPort(ctx, c.PortsClosedPort); !errors.Is(err, machine.ErrPortNotExposed) {
+			t.Errorf("DialPort(port not in the spec) error = %v, want ErrPortNotExposed", err)
+		}
+		// The dial fails until the agent is connected and nc listens.
+		var conn net.Conn
+		deadline := time.Now().Add(time.Minute)
+		for {
+			conn, err = m.DialPort(ctx, c.PortsGuestPort)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, machine.ErrPortUnavailable) && !errors.Is(err, machine.ErrPortRefused) {
+				t.Fatalf("DialPort() error = %v", err)
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("DialPort() did not connect in one minute: %v; events: %s", err, rec.dump())
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+		line, err := bufio.NewReader(conn).ReadString('\n')
+		if err != nil || line != c.PortsGuestLine+"\n" {
+			t.Errorf("read from the guest port = %q, %v; want %q", line, err, c.PortsGuestLine)
+		}
+		if _, err := io.WriteString(conn, c.PortsHostLine+"\n"); err != nil {
+			t.Errorf("write to the guest port: %v", err)
+		}
+		_ = conn.Close()
+		select {
+		case <-m.Done():
+		case <-time.After(time.Minute):
+			t.Fatalf("the guest listener did not end after the host close; events: %s", rec.dump())
+		}
+		res := m.Result()
+		if res.Exit == nil || res.Exit.Code != 0 {
+			t.Errorf("exit = %+v, want code 0; events: %s", res.Exit, rec.dump())
+		}
+		if out := rec.output(api.EventStdout); out != c.PortsHostLine+"\n" {
+			t.Errorf("guest stdout = %q, want the host line %q", out, c.PortsHostLine)
+		}
+		if _, err := m.DialPort(ctx, c.PortsGuestPort); !errors.Is(err, machine.ErrPortUnavailable) {
+			t.Errorf("DialPort() after the exit error = %v, want ErrPortUnavailable", err)
+		}
+		checkProof(t, rt, res)
+	})
 	// The gateway broker on a real guest: direct TCP to HTTP and SSH ports
 	// and direct UDP DNS reach public hosts with no proxy; metadata,
 	// private, and host-port destinations stay denied; the broker DNS still
