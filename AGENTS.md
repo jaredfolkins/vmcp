@@ -36,8 +36,13 @@
   1026. The host never connects to a guest network address, no nftables
   rule changes, and vmcp opens no new listener on a network. Unit tests
   prove the agent relay, the host match, the route, and the Go client. The
-  live gate has a `ports` subtest. A Linux/KVM live gate run for ports is
-  NOT VERIFIED.
+  live gate has a `ports` subtest. On 2026-11-20, on the Ubuntu 24.04
+  reference host with `scripts/live-gate.sh`, the subtest passed 23 of 24
+  runs, and the full gate passed with this change and the two object
+  mount fixes of `fix/objectmount-stream-fsync`, with zero
+  `apparmor="DENIED"` lines for `vmcp-live-gate` and no suppressed audit
+  line. In the one failed run the bytes moved in the two directions, but
+  the guest reported no exit. The cause of that run is NOT VERIFIED.
 - The self-test boots a machine from a built-in agent-only image. The guest
   proves that the vmcp port, metadata, private and direct destinations are
   unreachable and that the egress broker refuses metadata.
