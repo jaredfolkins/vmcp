@@ -182,6 +182,10 @@ const (
 	TypeExit MessageType = "exit"
 	// TypeDone is the last message. Every drive tar was sent.
 	TypeDone MessageType = "done"
+	// TypeDoneAck is the host-to-guest answer to TypeDone. The host read
+	// every message before TypeDone. The agent waits for it before it
+	// restarts the guest, so the last messages are not lost in the guest.
+	TypeDoneAck MessageType = "done-ack"
 	// TypeSecrets is the first host-to-guest message, sent once after Hello.
 	TypeSecrets MessageType = "secrets"
 	// TypeStop is a host-to-guest message after TypeSecrets. The agent sends

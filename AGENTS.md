@@ -42,7 +42,15 @@
   mount fixes of `fix/objectmount-stream-fsync`, with zero
   `apparmor="DENIED"` lines for `vmcp-live-gate` and no suppressed audit
   line. In the one failed run the bytes moved in the two directions, but
-  the guest reported no exit. The cause of that run is NOT VERIFIED.
+  the guest reported no exit. The host got none of the three last agent
+  messages of that run (the end of the start-process step, the exit, and
+  the done message), which the agent sends just before it restarts the
+  guest. The cause is NOT VERIFIED: 310 later stress guests, 150 of them
+  with 4 MB of output before the exit, lost no message. The agent now
+  waits for the host answer to its done message (`done-ack`, at most 3
+  seconds) before the restart, and it writes a console line when a send
+  failed or the answer did not come. So a restart cannot lose the last
+  messages, and the serial log names the cause of a later failure.
 - The self-test boots a machine from a built-in agent-only image. The guest
   proves that the vmcp port, metadata, private and direct destinations are
   unreachable and that the egress broker refuses metadata.
