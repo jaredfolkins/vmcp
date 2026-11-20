@@ -105,12 +105,16 @@ func run(ev *events) (code int, export bool, err error) {
 	}
 	ev.send(agentproto.Message{Type: agentproto.TypeStep, Step: "start-process", Status: "completed"})
 	// The process has ended. Each mount stores the files that it closed.
+	// The kernel sends the release of a descriptor after the process exit,
+	// so the count of dropped files is complete only after the close, which
+	// waits for the open writers.
 	for i, server := range mounts {
 		status, detail := "completed", ""
+		err := server.Close(agentproto.ObjectMountDrain)
 		if dropped := server.Dropped(); dropped > 0 {
 			detail = fmt.Sprintf("%d files not stored after the stop", dropped)
 		}
-		if err := server.Close(agentproto.ObjectMountDrain); err != nil {
+		if err != nil {
 			status, detail = "failed", err.Error()
 		}
 		ev.send(agentproto.Message{Type: agentproto.TypeStep, Step: "object-mount " + cfg.Mounts[i].GuestPath, Status: status, Detail: detail})
