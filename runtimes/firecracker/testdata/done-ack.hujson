@@ -1,0 +1,8 @@
+// The end of a guest: the agent sends the exit and then the done message.
+// The host must record the exit and answer the done message, because the
+// agent waits for the answer before it restarts the guest.
+{
+  "lines": "{\"type\":\"exit\",\"code\":7}\n{\"type\":\"done\"}\n",
+  "want_code": 7,
+  "want_answer": "{\"type\":\"done-ack\"}\n"
+}

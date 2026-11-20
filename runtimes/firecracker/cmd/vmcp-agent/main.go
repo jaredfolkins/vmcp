@@ -33,6 +33,8 @@ const (
 	mergedRoot  = "/.vmcp/merged"
 	chunkBytes  = 16 << 10
 	connectWait = 10 * time.Second
+	// doneAckWait bounds the wait for the host to confirm the last message.
+	doneAckWait = 3 * time.Second
 	defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
 
@@ -56,6 +58,10 @@ func main() {
 		ev.send(agentproto.Message{Type: agentproto.TypeExit, Code: code})
 	}
 	ev.send(agentproto.Message{Type: agentproto.TypeDone})
+	if err := ev.waitDone(doneAckWait); err != nil {
+		// The console is the one place that still reaches the host.
+		_, _ = fmt.Fprintln(console, "vmcp-agent: the host did not confirm the last messages:", err)
+	}
 	ev.close()
 	halt()
 }
@@ -74,6 +80,9 @@ func run(ev *events) (code int, export bool, err error) {
 	defer secrets.Clear()
 	stop := &stopper{}
 	ports := newPorter()
+	ev.mu.Lock()
+	ev.reading = true
+	ev.mu.Unlock()
 	go ev.readHostMessages(stop, ports)
 	cfg, err := readConfig()
 	if err != nil {
@@ -501,6 +510,44 @@ type events struct {
 	// r reads the host messages. One reader keeps a message that arrives
 	// right after Secrets in its buffer.
 	r *bufio.Reader
+	// sendErr is the first error of a send.
+	sendErr error
+	// reading is set when readHostMessages runs. acked is closed at the
+	// TypeDoneAck of the host, and gone when the host messages end.
+	reading     bool
+	acked, gone chan struct{}
+}
+
+// waitDone waits until the host confirms TypeDone. It returns the reason
+// when the host did not confirm: a send failed, the host connection ended,
+// or wait passed. An agent that does not read host messages cannot get the
+// answer, so it does not wait.
+func (e *events) waitDone(wait time.Duration) error {
+	e.mu.Lock()
+	sendErr, reading := e.sendErr, e.reading
+	e.mu.Unlock()
+	if sendErr != nil {
+		return fmt.Errorf("send: %w", sendErr)
+	}
+	if !reading {
+		return nil
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-e.acked:
+		return nil
+	case <-e.gone:
+		// The answer and the end of the connection can come together.
+		select {
+		case <-e.acked:
+			return nil
+		default:
+			return errors.New("the host connection ended")
+		}
+	case <-timer.C:
+		return fmt.Errorf("no answer in %s", wait)
+	}
 }
 
 // readSecrets reads the one Secrets message that the host sends after
@@ -524,7 +571,9 @@ func (e *events) readSecrets() (*agentproto.Secrets, error) {
 func (e *events) send(m agentproto.Message) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	_ = e.enc.Encode(m)
+	if err := e.enc.Encode(m); err != nil && e.sendErr == nil {
+		e.sendErr = err
+	}
 }
 
 func (e *events) close() {
@@ -538,7 +587,8 @@ func dialHost(port uint32) (*events, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &events{conn: conn, enc: json.NewEncoder(conn), r: bufio.NewReaderSize(conn, 64<<10)}, nil
+	return &events{conn: conn, enc: json.NewEncoder(conn), r: bufio.NewReaderSize(conn, 64<<10),
+		acked: make(chan struct{}), gone: make(chan struct{})}, nil
 }
 
 // dialVsock connects to the host CID. It retries while the host listener

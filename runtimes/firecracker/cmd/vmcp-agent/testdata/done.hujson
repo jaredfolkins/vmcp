@@ -1,0 +1,12 @@
+// The wait of the agent for the host answer to its last message. The agent
+// restarts the guest after the wait, so the wait must end on the answer, on
+// the end of the host connection, and at its limit.
+{
+  "answer": "{\"type\":\"done-ack\"}\n",
+  // The limit of a case that must end before it.
+  "long_wait_ms": 5000,
+  // The limit of the case with no answer, and the longest time that each
+  // other case may take.
+  "short_wait_ms": 200,
+  "max_ms": 2000
+}

@@ -40,6 +40,8 @@ func readLine(r *bufio.Reader, limit int) ([]byte, error) {
 // connection ends. A stop request goes to stop and a connect request to
 // ports; other types are ignored.
 func (e *events) readHostMessages(stop *stopper, ports *porter) {
+	defer close(e.gone)
+	acked := false
 	for {
 		line, err := readLine(e.r, agentproto.MaxLineBytes)
 		if err != nil {
@@ -54,6 +56,11 @@ func (e *events) readHostMessages(stop *stopper, ports *porter) {
 			stop.request(time.Duration(max(m.GraceMS, 0)) * time.Millisecond)
 		case agentproto.TypeConnect:
 			go ports.connect(m.ConnID, m.Port)
+		case agentproto.TypeDoneAck:
+			if !acked {
+				acked = true
+				close(e.acked)
+			}
 		}
 	}
 }

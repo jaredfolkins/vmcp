@@ -790,6 +790,9 @@ func (m *Machine) readEvents(c net.Conn) {
 				m.exit = &api.Exit{Code: msg.Code, Reason: api.ExitCompleted}
 			}
 			m.mu.Unlock()
+		case agentproto.TypeDone:
+			// The agent waits for this answer before it restarts the guest.
+			_ = m.sendHost(c, agentproto.Message{Type: agentproto.TypeDoneAck})
 		}
 	}
 }
