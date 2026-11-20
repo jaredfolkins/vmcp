@@ -208,7 +208,8 @@ least 4 MiB per request. A writable mount needs an
 upstream with `allow_write`; `read_only` mounts the folder read-only in the
 guest kernel. After a stop request, also a timeout and an output limit,
 only `fsync` stores a file: a close cuts an open upload, so the upstream
-keeps the earlier object. A guest kill cuts every open upload the same way.
+keeps the earlier object, and the `fsync` of a file that streams (a
+write-only file larger than 1 MiB) fails. A guest kill cuts every open upload the same way.
 After the process exits, the agent waits up to 60 seconds for the last
 uploads and reports each mount as an `object-mount <path>` step, with the
 number of files that it did not store after a stop.

@@ -345,7 +345,8 @@ func TestObjectMountModesAndReadAhead(t *testing.T) {
 // after Stopping, a close stores nothing, so a stream that a stopped
 // process left open is cut and the earlier object stays, and a new
 // unsynced file is not stored; a file synced before or after the stop is
-// stored; and the mount counts the dropped files.
+// stored; the sync of a file that streams fails; and the mount counts the
+// dropped files.
 func TestObjectMountStopKeepsEarlierObjects(t *testing.T) {
 	in := readObjectMountTestInput(t)
 	upstream, dir, server := mountFake(t, in, false)
@@ -381,6 +382,10 @@ func TestObjectMountStopKeepsEarlierObjects(t *testing.T) {
 	server.Stopping()
 	if err := syncedAfter.Sync(); err != nil {
 		t.Fatalf("fsync after the stop: %v", err)
+	}
+	// The close will cut the stream, so its sync must not report a success.
+	if err := stream.Sync(); !errors.Is(err, syscall.EIO) {
+		t.Errorf("fsync of a stream after the stop: %v, want EIO", err)
 	}
 	for _, f := range []*os.File{stream, unsynced, syncedBefore, syncedAfter} {
 		_ = f.Close()
