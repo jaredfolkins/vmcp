@@ -846,11 +846,16 @@ func (h *streamHandle) drop() {
 }
 
 // Fsync stores a buffered file. A file that streams is stored when it is
-// closed; ending the stream here would fail the writes that follow.
+// closed; ending the stream here would fail the writes that follow. After
+// Stopping the close cuts the stream, so the sync of a file that streams
+// fails: the process must not read a success for bytes that are dropped.
 func (h *streamHandle) Fsync(ctx context.Context, _ uint32) syscall.Errno {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.pipe != nil {
+		if h.f.st.stopping.Load() {
+			return syscall.EIO
+		}
 		return 0
 	}
 	return h.commit(ctx)
