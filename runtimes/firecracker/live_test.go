@@ -993,7 +993,7 @@ func TestLiveFirecracker(t *testing.T) {
 		}
 		res := m.Result()
 		if res.Exit == nil || res.Exit.Code != 0 {
-			t.Errorf("exit = %+v, want code 0; events: %s", res.Exit, rec.dump())
+			t.Errorf("exit = %+v, want code 0; events: %s; serial log tail: %s", res.Exit, rec.dump(), tail(filepath.Join(dir, "serial.log")))
 		}
 		if out := rec.output(api.EventStdout); out != c.PortsHostLine+"\n" {
 			t.Errorf("guest stdout = %q, want the host line %q", out, c.PortsHostLine)
