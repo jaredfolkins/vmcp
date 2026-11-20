@@ -400,6 +400,23 @@ func (m *Machine) closeListeners() {
 	m.listenWG.Wait()
 }
 
+// fileSizeLimit returns the largest file that the Firecracker process may
+// write: at least 1 GiB, and the size of the largest disk image plus slack.
+// The disk images are the writable root layer (Resources.DiskMiB) and the
+// drives. A smaller limit ends the guest with SIGXFSZ at its first write
+// past the limit.
+func fileSizeLimit(spec api.MachineSpec) int64 {
+	disk := spec.Resources.DiskMiB
+	if disk <= 0 {
+		disk = defaultDiskMiB
+	}
+	limit := max(int64(1)<<30, int64(disk)<<20+driveSlackBytes)
+	for _, d := range spec.Drives {
+		limit = max(limit, int64(d.SizeMiB)<<20+driveSlackBytes)
+	}
+	return limit
+}
+
 // serialLogName is the serial console file in the machine directory. The
 // export guest has its own, so that the console of the first guest stays.
 func (m *Machine) serialLogName() string {
@@ -423,10 +440,7 @@ func (m *Machine) Boot(ctx context.Context) error {
 	res := m.spec.Spec.Resources
 	mem := int64(max(res.MemoryMiB, 128)+memoryOverhead) << 20
 	quota := max(res.VCPUs, 1) * 100000
-	fsize := int64(1) << 30
-	for _, d := range m.spec.Spec.Drives {
-		fsize = max(fsize, int64(d.SizeMiB)<<20+driveSlackBytes)
-	}
+	fsize := fileSizeLimit(m.spec.Spec)
 	args := []string{
 		"--id", m.jailID,
 		"--exec-file", m.r.firecracker,
